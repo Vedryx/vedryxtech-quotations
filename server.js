@@ -1,6 +1,6 @@
 /* VedryxTech Quotations — static host plus the documents API.
  *
- * Serves public/ and exposes /api/documents backed by MongoDB. If Mongo is
+ * Serves webroot/ and exposes /api/documents backed by MongoDB. If Mongo is
  * unreachable the server still starts and the API answers 503, which the browser
  * treats as "work offline against local storage". */
 'use strict';
@@ -132,7 +132,7 @@ app.use((req, res, next) => {
   return res.status(401).json({ error: 'authentication required' });
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'webroot')));
 
 /* ------------------------------------------------------------- validation */
 

@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 
-const APP = path.join(__dirname, '..', 'public', 'app.js');
+const APP = path.join(__dirname, '..', 'webroot', 'app.js');
 
 global.localStorage = { getItem: () => null, setItem: () => {} };
 global.Store = {
