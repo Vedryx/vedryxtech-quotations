@@ -486,6 +486,13 @@ function initTheme() {
   state.theme = applyTheme(stored || (prefersDark ? 'dark' : 'light'));
 }
 
+/* Clears the session cookie server-side, then reloads — the gate then serves
+   the login screen. No-op-safe when the app runs without a password. */
+async function logout() {
+  try { await fetch('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
+  window.location.reload();
+}
+
 /* --------------------------------------------------------------- top bar */
 
 function renderTopbar() {
@@ -509,6 +516,13 @@ function renderTopbar() {
         : 'Offline — saved locally',
     }),
     themeBtn,
+    h('button', {
+      class: 'btn-icon',
+      title: 'Sign out',
+      'aria-label': 'Sign out',
+      onclick: logout,
+      text: '⎋',
+    }),
     showChrome && h('button', { class: 'btn-ghost', onclick: goList, text: listTitle() }),
     showChrome && h('button', { class: 'btn-dark', onclick: newDoc, text: 'New' }),
     state.screen === 'letter' && h('button', { class: 'btn-outline', onclick: goHome, text: 'All tools' }),

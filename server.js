@@ -14,14 +14,17 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
 /* -------------------------------------------------------------------- auth
- * Whole-app HTTP Basic Auth. The app has no per-user accounts (internal tool),
- * but it is deployed on a public domain and exposes unauthenticated mutation +
- * an outbound-email endpoint — so a single shared credential gates everything
- * (static, API, /send) at the edge of the process. Enabled whenever
- * APP_PASSWORD is set; if it is unset the app runs open and warns loudly at
- * startup, so a misconfigured deploy is visible rather than silently exposed. */
+ * Cookie-session login with a real login SCREEN (not a browser Basic-Auth
+ * prompt). One shared credential (APP_USER/APP_PASSWORD) — internal tool, no
+ * per-user accounts. On success we set a signed HMAC session cookie; every
+ * route except the login endpoints is gated. Unauthenticated GETs that want
+ * HTML get the login page; API calls get 401. Enabled whenever APP_PASSWORD is
+ * set; if unset the app runs open and warns loudly at startup. */
 const APP_USER = process.env.APP_USER || 'vedryx';
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
+const SESSION_SECRET = process.env.SESSION_SECRET || (APP_PASSWORD ? `vq:${APP_PASSWORD}` : '');
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+const SESSION_COOKIE = 'vq_session';
 
 function safeEqual(a, b) {
   const ba = Buffer.from(String(a));
@@ -30,23 +33,105 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(ba, bb);
 }
 
-app.use((req, res, next) => {
-  if (!APP_PASSWORD) return next(); // unprotected — start() warns
-  const [scheme, encoded] = String(req.headers.authorization || '').split(' ');
-  if (scheme === 'Basic' && encoded) {
-    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
-    const sep = decoded.indexOf(':');
-    const user = decoded.slice(0, sep);
-    const pass = decoded.slice(sep + 1);
-    if (safeEqual(user, APP_USER) && safeEqual(pass, APP_PASSWORD)) return next();
+function signSession(expMs) {
+  const payload = Buffer.from(JSON.stringify({ u: APP_USER, exp: expMs })).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifySession(token) {
+  if (!token || typeof token !== 'string') return false;
+  const dot = token.indexOf('.');
+  if (dot === -1) return false;
+  const payload = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
+  if (!safeEqual(sig, expected)) return false;
+  try {
+    const { exp } = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return typeof exp === 'number' && exp > Date.now();
+  } catch { return false; }
+}
+
+function readCookie(req, name) {
+  const raw = req.headers.cookie || '';
+  for (const part of raw.split(';')) {
+    const i = part.indexOf('=');
+    if (i === -1) continue;
+    if (part.slice(0, i).trim() === name) return decodeURIComponent(part.slice(i + 1).trim());
   }
-  res.set('WWW-Authenticate', 'Basic realm="VedryxTech Quotations", charset="UTF-8"');
-  return res.status(401).send('Authentication required.');
+  return null;
+}
+
+/* Self-contained, theme-aware login screen — served for unauthenticated HTML
+   requests. Inline everything so it never depends on a gated static asset. */
+function loginPage() {
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    + '<meta name="robots" content="noindex">'
+    + '<title>Sign in — VedryxTech</title><style>'
+    + ':root{--bg:#F4F5F7;--card:#fff;--ink:#14171F;--muted:#8A9099;--line:#E8EBEF;--accent:#14171F;--field:#fff}'
+    + '@media(prefers-color-scheme:dark){:root{--bg:#0d0f14;--card:#151922;--ink:#eef1f5;--muted:#8A9099;--line:#252b36;--accent:#eef1f5;--field:#0f1218}}'
+    + '*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+    + "font-family:Manrope,system-ui,-apple-system,'Segoe UI',sans-serif;background:var(--bg);color:var(--ink);padding:20px}"
+    + '.card{width:100%;max-width:380px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:32px 28px;box-shadow:0 8px 30px rgba(0,0,0,.08)}'
+    + '.brand{font-weight:800;font-size:13px;letter-spacing:.18em;color:var(--muted);margin-bottom:6px}'
+    + '.brand b{color:var(--ink)}h1{margin:0 0 22px;font-size:22px;font-weight:800;letter-spacing:-.01em}'
+    + 'label{display:block;font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--muted);margin:0 0 6px}'
+    + 'input{width:100%;padding:11px 12px;font-size:14px;border:1px solid var(--line);border-radius:8px;background:var(--field);color:var(--ink);margin-bottom:16px}'
+    + 'input:focus{outline:none;border-color:var(--accent)}'
+    + 'button{width:100%;padding:12px;font-size:14px;font-weight:800;letter-spacing:.02em;border:0;border-radius:8px;background:var(--accent);color:var(--bg);cursor:pointer}'
+    + 'button:disabled{opacity:.6;cursor:default}.err{min-height:18px;font-size:13px;color:#D64545;margin:2px 0 12px}'
+    + '</style></head><body><form class="card" id="f">'
+    + '<div class="brand">VEDRYX<b>TECH</b></div><h1>Sign in</h1>'
+    + '<label for="u">Username</label><input id="u" name="u" autocomplete="username" autofocus>'
+    + '<label for="p">Password</label><input id="p" name="p" type="password" autocomplete="current-password">'
+    + '<div class="err" id="e"></div><button id="b" type="submit">Sign in</button></form><script>'
+    + "var f=document.getElementById('f'),e=document.getElementById('e'),b=document.getElementById('b');"
+    + "f.addEventListener('submit',function(ev){ev.preventDefault();e.textContent='';b.disabled=true;"
+    + "fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},"
+    + "body:JSON.stringify({user:document.getElementById('u').value,password:document.getElementById('p').value})})"
+    + ".then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})})"
+    + ".then(function(x){if(x.ok){location.href='/'}else{e.textContent=(x.j&&x.j.error)||'Sign in failed.';b.disabled=false}})"
+    + ".catch(function(){e.textContent='Network error.';b.disabled=false});});"
+    + '</script></body></html>';
+}
+
+/* Body parser first so the login route can read req.body. */
+app.use(express.json({ limit: '2mb' }));
+
+/* Login / logout are always reachable (they are how you pass the gate). */
+app.post('/api/login', (req, res) => {
+  if (!APP_PASSWORD) return res.json({ ok: true }); // open mode
+  const user = String(req.body?.user ?? '');
+  const pass = String(req.body?.password ?? '');
+  if (safeEqual(user, APP_USER) && safeEqual(pass, APP_PASSWORD)) {
+    res.cookie(SESSION_COOKIE, signSession(Date.now() + SESSION_TTL_MS), {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: SESSION_TTL_MS,
+      path: '/',
+    });
+    return res.json({ ok: true });
+  }
+  return res.status(401).json({ ok: false, error: 'Wrong username or password.' });
 });
 
-/* Letterheads carry rich-text HTML up to ~200 KB — the previous 1 MB cap was
-   plenty, keep it generous. */
-app.use(express.json({ limit: '2mb' }));
+app.post('/api/logout', (req, res) => {
+  res.clearCookie(SESSION_COOKIE, { path: '/' });
+  res.json({ ok: true });
+});
+
+/* Gate everything else. */
+app.use((req, res, next) => {
+  if (!APP_PASSWORD) return next(); // unprotected — start() warns
+  if (verifySession(readCookie(req, SESSION_COOKIE))) return next();
+  const wantsHtml = String(req.headers.accept || '').includes('text/html');
+  if (req.method === 'GET' && wantsHtml) return res.status(200).type('html').send(loginPage());
+  return res.status(401).json({ error: 'authentication required' });
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 /* ------------------------------------------------------------- validation */
@@ -381,7 +466,7 @@ async function start() {
   app.listen(PORT, () => {
     console.log(`VedryxTech Quotations  →  http://localhost:${PORT}`);
     if (APP_PASSWORD) {
-      console.log(`Access                 →  Basic Auth ON (user "${APP_USER}")`);
+      console.log(`Access                 →  login screen ON (user "${APP_USER}")`);
     } else {
       console.warn('Access                 →  UNPROTECTED — set APP_PASSWORD to gate the app (open relay + XSS risk if public)');
     }
