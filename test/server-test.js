@@ -90,8 +90,9 @@ require.cache[require.resolve('mongodb')] = {
 /* Load lib/db.js AFTER cache pollution so it uses the fake driver. Load
    server.js after that so it consumes the same fake db instance. */
 const db = require(path.resolve(__dirname, '..', 'lib', 'db.js'));
-const { app, sanitize, renderDocEmail, fmtMoney, CURRENCIES, DEFAULT_CURRENCY } =
+const { app, sanitize, renderDocEmail, renderComposedEmail, fmtMoney, CURRENCIES, DEFAULT_CURRENCY } =
   require(path.resolve(__dirname, '..', 'server.js'));
+const { renderDocPdf, fmtMoneyForPdf } = require(path.resolve(__dirname, '..', 'lib', 'pdf.js'));
 
 async function main() {
   /* -------- sanitize() ----------------------------------------------- */
@@ -267,8 +268,26 @@ async function main() {
   eq('cc set from env', payload.cc, ['cc@example.com']);
   ok('from from env', payload.from === 'sales@example.com', payload.from);
   ok('subject includes doc number', /QT-Send/.test(payload.subject), payload.subject);
-  ok('html body includes client name', /Send Co/.test(payload.html));
-  ok('html body includes totals', /TOTAL/.test(payload.html));
+  /* The composed email surrounds the founder's personalised message with the
+     branded shell; the full commercial detail (line items, totals) now lives
+     in the PDF attachment, not inline. The default body greets the client by
+     name so we still expect their name in the HTML. */
+  ok('html body includes client name via default greeting', /Send Co/.test(payload.html));
+  ok('html body references the attached PDF', /attached as a PDF/i.test(payload.html), payload.html.slice(0, 400));
+
+  console.log('\n/send always attaches a PDF');
+  ok('attachments present', Array.isArray(payload.attachments), typeof payload.attachments);
+  ok('exactly one attachment', payload.attachments && payload.attachments.length === 1,
+    payload.attachments && String(payload.attachments.length));
+  const att = payload.attachments && payload.attachments[0];
+  ok('attachment filename ends in .pdf', att && /\.pdf$/.test(att.filename), att && att.filename);
+  ok('attachment filename carries doc number', att && /QT-Send/.test(att.filename), att && att.filename);
+  const pdfBytes = att && Buffer.from(att.content, 'base64');
+  ok('attachment decodes into a valid PDF header',
+    pdfBytes && pdfBytes.slice(0, 5).toString() === '%PDF-',
+    pdfBytes && pdfBytes.slice(0, 8).toString());
+  ok('attachment PDF is non-trivially sized (> 500 bytes)',
+    pdfBytes && pdfBytes.length > 500, pdfBytes && String(pdfBytes.length));
 
   console.log('\n/send override recipient');
   const sendRes2 = await fetch(`${baseUrl}/api/documents/${quoteId}/send`, {
@@ -363,9 +382,16 @@ async function main() {
   const jpyBody = await jpySend.json();
   ok('JPY send returns 200', jpySend.status === 200, JSON.stringify(jpyBody));
   const jpyPayload = JSON.parse(resendCalls[resendCalls.length - 1].opts.body);
-  ok('JPY email HTML uses ¥', jpyPayload.html.includes('¥250,000'), jpyPayload.html.match(/¥[\d,]+/g)?.join(','));
-  ok('JPY email HTML has NO $ prefix', !jpyPayload.html.includes('$250,000'));
-  ok('JPY email HTML has NO fractional yen', !jpyPayload.html.includes('¥250,000.00'));
+  /* The composed HTML shell doesn't include the totals any more — currency
+     lives in the PDF. Assert the attachment is present + a valid PDF, and
+     verify separately (via renderDocPdf directly) that per-doc currency
+     reaches the PDF renderer. */
+  ok('JPY send produced a PDF attachment',
+    jpyPayload.attachments && jpyPayload.attachments.length === 1
+      && Buffer.from(jpyPayload.attachments[0].content, 'base64').slice(0, 5).toString() === '%PDF-',
+    JSON.stringify(jpyPayload.attachments && jpyPayload.attachments[0] && jpyPayload.attachments[0].filename));
+  ok('JPY email HTML does NOT leak a USD amount (currency belongs to the PDF now)',
+    !jpyPayload.html.includes('$250,000'));
 
   await db.upsertDocument(sanitize({
     id: 911, type: 'quotation', number: 'QT-INR', currency: 'INR',
@@ -379,7 +405,9 @@ async function main() {
   });
   ok('INR send returns 200', inrSend.status === 200);
   const inrPayload = JSON.parse(resendCalls[resendCalls.length - 1].opts.body);
-  ok('INR email HTML uses ₹', inrPayload.html.includes('₹500,000.00'), inrPayload.html.match(/₹[\d,]+\.\d\d/g)?.join(','));
+  ok('INR send produced a PDF attachment',
+    inrPayload.attachments && inrPayload.attachments.length === 1
+      && Buffer.from(inrPayload.attachments[0].content, 'base64').slice(0, 5).toString() === '%PDF-');
 
   console.log('\nsanitize + upsert round-trip preserves per-doc currency');
   await db.upsertDocument(sanitize({
@@ -397,6 +425,153 @@ async function main() {
   }));
   const rtJpy = await db.getDocument(921);
   ok('JPY round-trips through sanitize + db', rtJpy && rtJpy.currency === 'JPY');
+
+  /* -------- composer: custom subject / body / to overrides -------- */
+
+  console.log('\n/send accepts composer overrides (subject, body, to)');
+  await db.upsertDocument(sanitize({
+    id: 930, type: 'quotation', number: 'QT-COMPOSE',
+    issueDate: '2026-08-13', validUntil: '2026-09-12',
+    client: { name: 'Compose Co', email: 'ignored@fallback.co' },
+    items: [{ service: 'Consulting', qty: 2, price: 1500 }],
+    discount: 0, taxRate: 18, notes: '',
+  }));
+  const composerRes = await fetch(`${baseUrl}/api/documents/930/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      to: 'finance@compose.co',
+      subject: 'Custom subject from the founder',
+      body: 'Hey team,\n\nAttached is the retainer we discussed on Friday.\n\nCheers',
+    }),
+  });
+  const composerJson = await composerRes.json();
+  ok('composer /send returns 200', composerRes.status === 200, JSON.stringify(composerJson));
+  const composerCall = JSON.parse(resendCalls[resendCalls.length - 1].opts.body);
+  eq('composer TO overrides doc.client.email', composerCall.to, ['finance@compose.co']);
+  ok('composer SUBJECT reaches Resend', composerCall.subject === 'Custom subject from the founder', composerCall.subject);
+  ok('composer BODY reaches Resend (in the HTML)',
+    /Attached is the retainer we discussed on Friday/.test(composerCall.html), composerCall.html.slice(0, 800));
+  ok('composer preserves line breaks as <br>',
+    /Hey team,<br><br>Attached is the retainer/.test(composerCall.html), composerCall.html.slice(0, 800));
+  ok('composer response reports the override recipient',
+    composerJson.to === 'finance@compose.co', JSON.stringify(composerJson));
+  ok('composer /send attached a PDF',
+    composerCall.attachments && composerCall.attachments.length === 1
+      && Buffer.from(composerCall.attachments[0].content, 'base64').slice(0, 5).toString() === '%PDF-');
+  ok('composer PDF filename derived from doc.number',
+    composerCall.attachments[0].filename === 'QT-COMPOSE.pdf', composerCall.attachments[0].filename);
+
+  console.log('\ncomposer body is HTML-escaped so a hostile paste cannot inject markup');
+  const evilRes = await fetch(`${baseUrl}/api/documents/930/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      to: 'ok@compose.co',
+      subject: 'x',
+      body: '<script>alert(1)</script> and a <b>bold</b> claim',
+    }),
+  });
+  ok('escaped /send returns 200', evilRes.status === 200);
+  const evilCall = JSON.parse(resendCalls[resendCalls.length - 1].opts.body);
+  ok('script tag escaped in the email HTML',
+    !/[<]script[>]alert\(1\)[<]\/script[>]/.test(evilCall.html), evilCall.html.slice(0, 500));
+  ok('script text still shows escaped (defense in depth)',
+    /&lt;script&gt;alert\(1\)&lt;\/script&gt;/.test(evilCall.html), evilCall.html.slice(0, 500));
+
+  console.log('\ncomposer falls back to defaults when fields are omitted');
+  const defRes = await fetch(`${baseUrl}/api/documents/930/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  ok('/send without body still returns 200', defRes.status === 200);
+  const defCall = JSON.parse(resendCalls[resendCalls.length - 1].opts.body);
+  eq('recipient falls back to doc.client.email', defCall.to, ['ignored@fallback.co']);
+  ok('subject falls back to default with doc number',
+    /Quotation QT-COMPOSE from Vedryx/.test(defCall.subject), defCall.subject);
+  ok('body falls back to default template',
+    /Please find the attached quotation/i.test(defCall.html), defCall.html.slice(0, 600));
+
+  /* -------- renderComposedEmail direct tests ---------------------- */
+
+  console.log('\nrenderComposedEmail — direct');
+  const composed = renderComposedEmail(
+    { id: 1, type: 'quotation', number: 'QT-X', client: { name: 'Direct Co' } },
+    'Line one\nLine two',
+    'QT-X.pdf',
+  );
+  ok('opens with <!doctype html>', composed.startsWith('<!doctype html>'), composed.slice(0, 20));
+  ok('preserves multi-line body via <br>', /Line one<br>Line two/.test(composed), composed.slice(0, 400));
+  ok('references the attachment filename', composed.includes('QT-X.pdf'), composed.slice(0, 400));
+  ok('escapes < in raw body',
+    renderComposedEmail({ id: 1, type: 'invoice', number: 'X' }, '<x>', 'X.pdf').includes('&lt;x&gt;'));
+
+  /* -------- lib/pdf.js unit tests --------------------------------- */
+
+  console.log('\nlib/pdf.js — renderDocPdf produces a valid PDF buffer');
+  const pdfDoc = {
+    id: 1, type: 'quotation', number: 'QT-PDF-001', currency: 'USD',
+    issueDate: '2026-08-13', validUntil: '2026-09-12',
+    client: {
+      name: 'PDF Test Co', contact: 'Ada Lovelace',
+      email: 'ada@pdf.test', phone: '+1 555 0000',
+      address: '10 Downing St\nLondon',
+    },
+    items: [
+      { service: 'Discovery', description: 'Two-day workshop and requirement mapping', qty: 1, price: 2500 },
+      { service: 'Build', description: '', qty: 5, price: 1000 },
+    ],
+    discount: 5, taxRate: 18, notes: 'NET 15.\nBank transfer preferred.',
+  };
+  const buf = await renderDocPdf(pdfDoc);
+  ok('renderDocPdf returns a Buffer', Buffer.isBuffer(buf));
+  ok('starts with %PDF- header',
+    buf.slice(0, 5).toString() === '%PDF-', buf.slice(0, 8).toString());
+  ok('non-trivially sized (> 800 bytes)', buf.length > 800, String(buf.length));
+  ok('ends with %%EOF', /%%EOF\s*$/.test(buf.slice(-32).toString()), buf.slice(-32).toString());
+
+  /* Prove the file lands on disk cleanly — mirrors how Vercel would return a
+     buffer + how manual verification unpacks it. */
+  const tmpPath = path.join(require('os').tmpdir(), `vedryx-pdf-test-${Date.now()}.pdf`);
+  require('fs').writeFileSync(tmpPath, buf);
+  const onDisk = require('fs').readFileSync(tmpPath);
+  ok('file written to disk and re-read is byte-identical',
+    onDisk.length === buf.length && onDisk.slice(0, 5).toString() === '%PDF-',
+    `${tmpPath} (${onDisk.length} bytes)`);
+  try { require('fs').unlinkSync(tmpPath); } catch { /* ignore */ }
+
+  console.log('\nlib/pdf.js — renders each currency without throwing');
+  for (const cur of ['USD', 'INR', 'EUR', 'AED', 'GBP', 'JPY']) {
+    const perCurBuf = await renderDocPdf({ ...pdfDoc, currency: cur });
+    ok(`${cur} renders as a valid PDF`,
+      Buffer.isBuffer(perCurBuf) && perCurBuf.slice(0, 5).toString() === '%PDF-' && perCurBuf.length > 500,
+      `${cur} → ${perCurBuf && perCurBuf.length} bytes`);
+  }
+
+  console.log('\nlib/pdf.js — invoice title path');
+  const invBuf = await renderDocPdf({ ...pdfDoc, type: 'invoice', number: 'INV-PDF-001' });
+  ok('invoice PDF renders', invBuf.slice(0, 5).toString() === '%PDF-' && invBuf.length > 500);
+
+  console.log('\nlib/pdf.js — hostile input does not crash');
+  const evilBuf = await renderDocPdf({
+    id: 1, type: 'quotation', number: '../../<script>x</script>', currency: 'USD',
+    issueDate: '', validUntil: '',
+    client: { name: 'x'.repeat(300), email: 'a@b.co' },
+    items: Array.from({ length: 20 }, (_, i) => ({
+      service: `Line ${i}`, description: 'y'.repeat(400), qty: 1, price: 100,
+    })),
+    discount: 0, taxRate: 0, notes: 'z'.repeat(3000),
+  });
+  ok('long / hostile inputs still render a PDF',
+    evilBuf.slice(0, 5).toString() === '%PDF-' && evilBuf.length > 500,
+    String(evilBuf.length));
+
+  console.log('\nlib/pdf.js — fmtMoneyForPdf strips the ₹ glyph (Helvetica cannot encode it)');
+  ok('INR uses INR prefix in PDF (no ₹)',
+    fmtMoneyForPdf('INR', 1000) === 'INR 1,000.00', fmtMoneyForPdf('INR', 1000));
+  ok('USD keeps $ prefix', fmtMoneyForPdf('USD', 1000) === '$1,000.00', fmtMoneyForPdf('USD', 1000));
+  ok('JPY keeps ¥ and zero decimals', fmtMoneyForPdf('JPY', 1000) === '¥1,000', fmtMoneyForPdf('JPY', 1000));
 
   /* -------- teardown ------------------------------------------------ */
   global.fetch = origFetch;

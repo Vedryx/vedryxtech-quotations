@@ -272,6 +272,13 @@ const state = {
   theme: 'light',    // 'light' | 'dark' — persisted to localStorage
   sending: false,    // true while /send is in flight
   sendResult: null,  // { ok, message } surfaced next to the send button
+  /* Composer: null when closed. When open, holds the editable TO / SUBJECT /
+     MESSAGE the founder can personalise before "Send to client" actually fires.
+     Opening is gated on validateDraft(); actual sending happens from the
+     confirmSendFromComposer path so the composer is guaranteed to be the only
+     path to /api/documents/:id/send from the UI. */
+  composer: null,
+  composerEmailError: null,  // inline "not an email" message inside the modal
 };
 
 function setState(patch) {
@@ -400,8 +407,10 @@ function goPreview() {
   commit(q, { screen: 'preview', saved: false, autoSaved: wasUnsaved });
 }
 
-/* Sending is the locking, client-facing step, so it validates first, then
-   fires the transactional email via /api/documents/:id/send. */
+/* Kicks off the send flow. Validates the document first (same rules as
+   before), then opens the composer modal — the founder can personalise TO /
+   SUBJECT / MESSAGE and only then does the real /send fire. Nothing is
+   committed or emailed by clicking "Send to client" alone. */
 function sendQuote() {
   const d = state.draft || blankDoc();
   const errors = validateDraft(d);
@@ -410,27 +419,80 @@ function sendQuote() {
     focusFirstError();
     return;
   }
-  /* Sending commits the document whether or not Save or Preview was ever pressed. */
+  openComposer();
+}
+
+/* Suggested default body per doc type. Founder can rewrite anything before
+   sending; kept short so it reads like a personal note, not a template. */
+function defaultComposerBody(d) {
+  const type = d.type === 'invoice' ? 'invoice' : 'quotation';
+  const greeting = d.client?.name ? `Hi ${d.client.name},` : 'Hi,';
+  return `${greeting}\n\nPlease find the attached ${type} for your review. Let me know if you have any questions.\n\nRegards,\nVedryx`;
+}
+
+function defaultComposerSubject(d) {
+  const noun = d.type === 'invoice' ? 'Invoice' : 'Quotation';
+  return `${noun} ${d.number || ''} from Vedryx`.replace(/\s+/g, ' ').trim();
+}
+
+function openComposer() {
+  const d = state.draft;
+  state.composer = {
+    to: String(d.client?.email || '').trim(),
+    subject: defaultComposerSubject(d),
+    body: defaultComposerBody(d),
+  };
+  state.composerEmailError = null;
+  state.sendResult = null;
+  render();
+}
+
+function closeComposer() {
+  state.composer = null;
+  state.composerEmailError = null;
+  render();
+}
+
+/* Called by the composer's Send button. Everything the server needs (to /
+   subject / body) is captured here; the document itself is committed as Sent
+   at the same moment so that the doc the server looks up matches what the
+   user saw when they hit Send. */
+function confirmSendFromComposer() {
+  const c = state.composer;
+  if (!c) return;
+  const to = String(c.to || '').trim();
+  if (!EMAIL_RE.test(to)) {
+    state.composerEmailError = 'That does not look like an email address.';
+    render();
+    return;
+  }
+  state.composerEmailError = null;
+
+  const d = state.draft || blankDoc();
   const q = normalizeDoc(clone(d));
   q.status = 'Sent';
   if (!state.numberTouched) q.number = q.number || nextNumber();
 
   state.sending = true;
   state.sendResult = null;
+  state.composer = null;
+  render();
 
   commit(q, {
     screen: 'list', filter: 'Sent', locked: false,
     errors: {}, validated: false, autoSaved: false,
   }).then((ok) => {
-    /* If the commit itself did not land, the email would have nothing to look
-       up server-side — surface the failure and stop. */
     if (!ok) {
       state.sending = false;
       state.sendResult = { ok: false, message: `Saved locally, but the database is offline — email skipped.` };
       render();
       return;
     }
-    return sendDocEmail(q.id).then((res) => {
+    return sendDocEmail(q.id, {
+      to,
+      subject: String(c.subject || '').trim(),
+      body: String(c.body || ''),
+    }).then((res) => {
       state.sending = false;
       state.sendResult = res;
       render();
@@ -438,14 +500,13 @@ function sendQuote() {
   });
 }
 
-/* POST /api/documents/:id/send. Returns { ok, message } — never throws.
-   No currency field: the server reads it off the persisted doc (see
-   sanitize()), so the emailed copy always matches what was saved. */
-function sendDocEmail(id) {
+/* POST /api/documents/:id/send with the composer values. Returns
+   { ok, message } — never throws. */
+function sendDocEmail(id, payload) {
   return fetch(`/api/documents/${id}/send`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify(payload || {}),
   }).then((r) => r.json().then((body) => ({ status: r.status, body })))
     .then(({ status, body }) => {
       if (status >= 200 && status < 300 && body && body.sent) {
@@ -1156,6 +1217,73 @@ function renderPreview() {
       text: `Sent on ${fmtDate(d.issueDate)} — locked. Duplicate it as a draft to make changes.`,
     }),
     sheet,
+    state.composer && renderComposer(),
+  );
+}
+
+/* Compose screen: a modal overlay that opens over Preview when the founder
+   hits "Send to client". TO / SUBJECT / MESSAGE are all editable. Send here
+   is what actually triggers /api/documents/:id/send — clicking outside or
+   Cancel closes without doing anything. Sending state and result show up on
+   the preview page after the modal closes. */
+function renderComposer() {
+  const c = state.composer;
+  const noun = isInvoice() ? 'invoice' : 'quotation';
+
+  const toInput = h('input', {
+    class: 'inp' + (state.composerEmailError ? ' is-invalid' : ''),
+    type: 'email', value: c.to, maxlength: '160', autocomplete: 'off',
+    placeholder: 'client@company.com',
+    oninput: (e) => { c.to = e.target.value; if (state.composerEmailError) { state.composerEmailError = null; render(); } },
+  });
+
+  const subjectInput = h('input', {
+    class: 'inp', value: c.subject, maxlength: '200',
+    oninput: (e) => { c.subject = e.target.value; },
+  });
+
+  const bodyInput = h('textarea', {
+    class: 'inp compose-body', rows: '8', maxlength: '20000',
+    placeholder: `Write a note to your client — this becomes the email body. The full ${noun} is attached as a PDF.`,
+    oninput: (e) => { c.body = e.target.value; },
+  }, c.body);
+
+  const stopClick = (e) => { e.stopPropagation && e.stopPropagation(); };
+
+  return h('div', {
+    class: 'modal-scrim no-print',
+    role: 'dialog', 'aria-modal': 'true', 'aria-label': `Send ${noun}`,
+    onclick: closeComposer,
+  },
+    h('div', { class: 'modal', onclick: stopClick },
+      h('div', { class: 'modal-head' },
+        h('h2', { class: 'modal-title', text: `Send ${noun}` }),
+        h('button', { class: 'btn-icon', title: 'Close', 'aria-label': 'Close', text: '×', onclick: closeComposer }),
+      ),
+      h('div', { class: 'modal-body' },
+        h('label', { class: 'lbl stacked' },
+          h('span', { class: 'lbl-text', text: 'To' }),
+          toInput,
+          state.composerEmailError && h('div', { class: 'field-error', text: state.composerEmailError }),
+        ),
+        h('label', { class: 'lbl stacked' },
+          h('span', { class: 'lbl-text', text: 'Subject' }),
+          subjectInput,
+        ),
+        h('label', { class: 'lbl stacked' },
+          h('span', { class: 'lbl-text', text: 'Message' }),
+          bodyInput,
+        ),
+        h('div', { class: 'compose-note', text: `The ${noun} will be attached as a PDF — your message above becomes the email body.` }),
+      ),
+      h('div', { class: 'modal-foot' },
+        h('button', { class: 'btn-outline', text: 'Cancel', onclick: closeComposer }),
+        h('button', {
+          class: 'btn-dark', text: state.sending ? 'Sending…' : 'Send',
+          disabled: state.sending, onclick: confirmSendFromComposer,
+        }),
+      ),
+    ),
   );
 }
 

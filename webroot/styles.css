@@ -566,6 +566,58 @@ textarea.inp.notes {
 }
 .letter-foot { padding: 18px 40px 26px; }
 
+/* ---------------------------------------------------------------- compose modal
+   Fixed overlay used by the "Send to client" flow. Sits above the preview
+   sheet, blocks scroll on the sheet via pointer-events, and closes on scrim
+   click. Matches the light/dark chrome via the same CSS custom properties as
+   the rest of the app. */
+
+.modal-scrim {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(20, 23, 31, .55);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 40px 16px 24px;
+  overflow-y: auto;
+  backdrop-filter: blur(4px);
+}
+.modal {
+  width: 100%; max-width: 560px;
+  background: #fff; border: 1px solid var(--line);
+  border-radius: 16px; box-shadow: 0 24px 64px rgba(0, 0, 0, .35);
+  display: flex; flex-direction: column; overflow: hidden;
+  margin: auto 0;
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 18px; border-bottom: 1px solid var(--line-3);
+}
+.modal-title {
+  margin: 0; font-weight: 800; font-size: 18px; letter-spacing: -.01em;
+  text-transform: capitalize;
+}
+.modal-body {
+  padding: 16px 18px; display: grid; gap: 12px;
+}
+.compose-body {
+  min-height: 180px;
+  font-weight: 500; font-size: 14px; line-height: 1.55; color: var(--text-2);
+  resize: vertical;
+}
+.compose-note {
+  font-size: 12px; color: var(--text-4); line-height: 1.5;
+}
+.modal-foot {
+  display: flex; gap: 10px; justify-content: flex-end;
+  padding: 14px 18px; border-top: 1px solid var(--line-3);
+  background: var(--fill-3);
+}
+
+:root[data-theme="dark"] .modal {
+  background: var(--fill-3); border-color: var(--line);
+}
+:root[data-theme="dark"] .modal-foot { background: var(--fill); }
+:root[data-theme="dark"] .modal-scrim { background: rgba(0, 0, 0, .68); }
+
 /* ---------------------------------------------------------------- printing */
 
 @media print {
