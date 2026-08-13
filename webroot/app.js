@@ -223,7 +223,7 @@ function blankDoc() {
     client: { name: '', contact: '', email: '', phone: '', address: '' },
     items: [{ id: Date.now(), service: '', description: '', qty: 1, price: 0 }],
     discount: 0, taxRate: Number(CONFIG.defaultTax),
-    notes: '50% advance to begin, balance on delivery.\nQuotation valid for 30 days.',
+    notes: '20% advance to begin, balance on delivery.\nQuotation valid for 30 days.',
   };
 }
 
