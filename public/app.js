@@ -508,7 +508,7 @@ function renderTopbar() {
         ? `Offline — ${store.pending} not in database`
         : 'Offline — saved locally',
     }),
-    showChrome && themeBtn,
+    themeBtn,
     showChrome && h('button', { class: 'btn-ghost', onclick: goList, text: listTitle() }),
     showChrome && h('button', { class: 'btn-dark', onclick: newDoc, text: 'New' }),
     state.screen === 'letter' && h('button', { class: 'btn-outline', onclick: goHome, text: 'All tools' }),
