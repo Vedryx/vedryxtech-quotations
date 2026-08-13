@@ -328,13 +328,28 @@ const before = printed;
 fire(findByText(screenEl(), 'Download PDF'), 'click');
 ok('window.print called', printed === before + 1);
 
-console.log('\nsend to client -> locks and returns to the Sent list');
+console.log('\nsend to client -> opens the composer, Send fires the email + locks');
 fire(findByText(screenEl(), 'Send to client'), 'click');
+ok('composer opened', !!A.state.composer, JSON.stringify(A.state.composer));
+ok('composer TO prefilled from client.email',
+  A.state.composer && A.state.composer.to === 'dev@halcyon.design',
+  String(A.state.composer && A.state.composer.to));
+ok('composer SUBJECT prefilled with doc number',
+  A.state.composer && /QT-2026-013/.test(A.state.composer.subject),
+  String(A.state.composer && A.state.composer.subject));
+ok('composer BODY has default text',
+  A.state.composer && /Please find the attached quotation/.test(A.state.composer.body),
+  String(A.state.composer && A.state.composer.body));
+/* Confirming Send in the composer is what actually fires /send + locks the row.
+   The /send fetch itself resolves on a microtask chain (commit → then → send),
+   so the assertions here focus on the synchronous state transitions the click
+   causes; the full request-shape / attachment / subject / body verification
+   lives in server-test.js against a real HTTP round-trip. */
+fire(findByText(screenEl(), 'Send'), 'click');
+ok('composer closed', A.state.composer === null);
 ok('screen is list', A.state.screen === 'list', A.state.screen);
 ok('filter is Sent', A.state.filter === 'Sent', A.state.filter);
 ok('three sent rows now', findAll(screenEl(), 'row').length === 3, String(findAll(screenEl(), 'row').length));
-/* The email fetch is fired inside a microtask chain from the click handler.
-   Full assertions on request shape / mock behaviour live in server-test.js. */
 
 console.log('\nopening a Sent quotation locks it into preview');
 fire(findAll(screenEl(), 'row')[0], 'click');
@@ -524,6 +539,8 @@ ok('email accepted', !A.state.errors.clientEmail);
 console.log('\nnow the send goes through');
 A.state.screen = 'preview'; A.render();
 fire(findByText(screenEl(), 'Send to client'), 'click');
+ok('composer opened for the fixed doc', !!A.state.composer, JSON.stringify(A.state.composer));
+fire(findByText(screenEl(), 'Send'), 'click');
 ok('landed on the Sent list', A.state.screen === 'list', A.state.screen);
 ok('one document saved', A.state.quotes.length === quotesBefore + 1);
 ok('status is Sent', A.state.quotes[0].status === 'Sent');
@@ -586,6 +603,16 @@ const beforeSend = A.state.quotes.length;
 ok('document is unsaved', A.state.draft.id === null);
 A.state.screen = 'preview'; A.render();   // reach Send without going through Preview
 fire(findByText(screenEl(), 'Send to client'), 'click');
+ok('composer opened for the fresh doc', !!A.state.composer);
+/* The composer accepts overrides on TO / SUBJECT / BODY; assert the state
+   captured them. The actual /send round-trip is covered in server-test.js. */
+A.state.composer.body = 'Hey Orbit — attached the retainer as discussed.';
+A.state.composer.subject = 'Retainer for Orbit Media';
+ok('composer captured custom subject',
+  A.state.composer.subject === 'Retainer for Orbit Media', A.state.composer.subject);
+ok('composer captured custom body',
+  /attached the retainer as discussed/.test(A.state.composer.body), A.state.composer.body);
+fire(findByText(screenEl(), 'Send'), 'click');
 ok('landed on the Sent list', A.state.screen === 'list', A.state.screen);
 ok('exactly one document was added', A.state.quotes.length === beforeSend + 1);
 const orbit = A.state.quotes.find((q) => q.client.name === 'Orbit Media');

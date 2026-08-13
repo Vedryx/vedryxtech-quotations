@@ -9,6 +9,7 @@ const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 const db = require('./lib/db');
+const { renderDocPdf } = require('./lib/pdf');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -409,8 +410,51 @@ function renderDocEmail(doc) {
 </body></html>`;
 }
 
-/* Send the document as an email via Resend. Frontend calls this after a
-   successful lock+commit. */
+/* The composer-driven email: a plain branded shell around the founder's own
+   message, plus a "PDF attached" line pointing at the attachment. The full
+   commercial detail now lives in the PDF, so we deliberately keep this HTML
+   short — most of the content is the personalised body the founder typed.
+   The body is escape()d so any raw HTML characters render as text; \n line
+   breaks are preserved with <br> so single- and multi-paragraph messages
+   both render as written. */
+function renderComposedEmail(doc, bodyText, attachmentName) {
+  const type = doc.type === 'invoice' ? 'invoice' : 'quotation';
+  const noun = type === 'invoice' ? 'Invoice' : 'Quotation';
+  const safeBody = esc(bodyText || '').replace(/\r?\n/g, '<br>');
+  const attachLine = attachmentName
+    ? `Your ${type} (<strong>${esc(doc.number || noun)}</strong>) is attached as a PDF (${esc(attachmentName)}).`
+    : `Your ${type} (<strong>${esc(doc.number || noun)}</strong>) is attached as a PDF.`;
+
+  return `<!doctype html>
+<html><body style="margin:0;background:#F4F5F7;font-family:Manrope,system-ui,-apple-system,'Segoe UI',sans-serif;color:#14171F">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F4F5F7;padding:24px 12px">
+    <tr><td align="center">
+      <table role="presentation" width="620" cellpadding="0" cellspacing="0" style="max-width:620px;width:100%;background:#fff;border:1px solid #E8EBEF;border-radius:8px;overflow:hidden">
+        <tr><td style="height:6px;background:#14171F"></td></tr>
+        <tr><td style="padding:28px 28px 8px">
+          <div style="font-weight:800;font-size:13px;letter-spacing:.16em;color:#8A9099">VEDRYXTECH</div>
+        </td></tr>
+        <tr><td style="padding:6px 28px 4px;font-size:15px;line-height:1.65;color:#14171F;white-space:normal">
+          ${safeBody || '&mdash;'}
+        </td></tr>
+        <tr><td style="padding:18px 28px 4px;font-size:14px;line-height:1.6;color:#5B6270">
+          ${attachLine}
+        </td></tr>
+        <tr><td style="padding:18px 28px;border-top:1px solid #EDF0F4;font-size:12px;color:#5B6270;margin-top:8px">
+          Reply to this email if you have any questions. &mdash; VedryxTech
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+/* Send the document as an email via Resend. Payload:
+     { to?: string, subject?: string, body?: string }
+   `to` overrides doc.client.email; `subject` and `body` come from the compose
+   step in the UI. Missing values fall back to sensible defaults so the endpoint
+   remains callable with an empty body for compatibility with older tests /
+   direct API calls. Always attaches the PDF. */
 app.post('/api/documents/:id/send', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' });
@@ -439,10 +483,33 @@ app.post('/api/documents/:id/send', async (req, res) => {
   const cc = process.env.SALES_CC || 'we@vedryxtech.com';
 
   const noun = doc.type === 'invoice' ? 'Invoice' : 'Quotation';
-  const subject = `${noun} ${doc.number || ''} from Vedryx`.replace(/\s+/g, ' ').trim();
-  /* The doc carries its own currency (see sanitize()); the request body no
-     longer overrides it — the sent email must match what was saved. */
-  const html = renderDocEmail(doc);
+  const defaultSubject = `${noun} ${doc.number || ''} from Vedryx`.replace(/\s+/g, ' ').trim();
+  const requestedSubject = str(req.body?.subject, 200);
+  const subject = requestedSubject || defaultSubject;
+
+  const defaultBody = doc.client?.name
+    ? `Hi ${doc.client.name},\n\nPlease find the attached ${noun.toLowerCase()}.\n\nRegards,\nVedryx`
+    : `Hi,\n\nPlease find the attached ${noun.toLowerCase()}.\n\nRegards,\nVedryx`;
+  /* Body is founder-authored but still escaped by renderComposedEmail so a
+     stray "<" cannot turn into markup. Length cap keeps a monster paste from
+     ballooning the Resend request body. */
+  const requestedBody = typeof req.body?.body === 'string' ? req.body.body.slice(0, 20000) : '';
+  const emailBody = requestedBody || defaultBody;
+
+  const filename = `${(doc.number || `${noun}-${id}`).replace(/[^A-Za-z0-9._-]/g, '_')}.pdf`;
+
+  /* PDF generation is CPU-only, deterministic, and pdf-lib bundles cleanly on
+     Vercel Node runtime with no extra includeFiles configuration (see lib/pdf.js
+     comments). A failure here means the shape of the doc broke the renderer —
+     surface it rather than sending an email with no attachment. */
+  let pdfBuf;
+  try {
+    pdfBuf = await renderDocPdf(doc);
+  } catch (err) {
+    return res.status(500).json({ error: 'pdf render failed', detail: err.message });
+  }
+
+  const html = renderComposedEmail(doc, emailBody, filename);
 
   const payload = {
     from,
@@ -450,6 +517,10 @@ app.post('/api/documents/:id/send', async (req, res) => {
     cc: cc ? [cc] : undefined,
     subject,
     html,
+    attachments: [{
+      filename,
+      content: pdfBuf.toString('base64'),
+    }],
   };
 
   let resendRes;
@@ -502,4 +573,7 @@ async function start() {
 
 if (require.main === module) start();
 
-module.exports = { app, sanitize, renderDocEmail, fmtMoney, CURRENCIES, DEFAULT_CURRENCY, start };
+module.exports = {
+  app, sanitize, renderDocEmail, renderComposedEmail,
+  fmtMoney, CURRENCIES, DEFAULT_CURRENCY, start,
+};
