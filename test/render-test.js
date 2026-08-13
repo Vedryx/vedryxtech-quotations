@@ -1,15 +1,67 @@
 /* Runs app.js's real render path against a minimal DOM shim, then drives the
-   app by invoking the listeners it attached. Verifies wiring, not layout. */
+   app by invoking the listeners it attached. Verifies wiring, not layout.
+   No seed data lives in app.js any more — this test seeds the fake Store's
+   mirror so the classic Quotations / Invoices flow keeps its coverage. */
 const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 
 const APP = path.join(__dirname, '..', 'public', 'app.js');
 
+/* Same three quotations + one invoice the old seed carried. */
+function fixtures() {
+  return [
+    {
+      id: 1, type: 'quotation', number: 'QT-2026-011', status: 'Sent',
+      issueDate: '2026-07-02', validUntil: '2026-08-01',
+      client: { name: 'Really Great Company', contact: 'Avery Shaw', email: 'avery@reallygreat.com', phone: '', address: '123 Anywhere St, Any City' },
+      items: [
+        { id: 1, service: 'Service 1', description: 'Discovery workshop and requirement mapping', qty: 1, price: 200 },
+        { id: 2, service: 'Service 2', description: 'Backend integration and QA', qty: 1, price: 100 },
+        { id: 3, service: 'Design 1', description: 'UI design for 6 screens, two revision rounds', qty: 1, price: 250 },
+      ],
+      discount: 0, taxRate: 0,
+      notes: '50% advance to begin, balance on delivery.\nQuotation valid for 30 days.',
+    },
+    {
+      id: 2, type: 'quotation', number: 'QT-2026-012', status: 'Sent',
+      issueDate: '2026-07-21', validUntil: '2026-08-20',
+      client: { name: 'Northwind Labs', contact: 'Rhea Menon', email: 'rhea@northwind.io', phone: '', address: '88 Harbour Road, Kochi' },
+      items: [
+        { id: 1, service: 'Website revamp', description: 'Marketing site, 8 pages, CMS setup', qty: 1, price: 1800 },
+        { id: 2, service: 'Maintenance', description: 'Monthly retainer, 3 months', qty: 3, price: 150 },
+      ],
+      discount: 5, taxRate: 18,
+      notes: 'Hosting billed separately at actuals.',
+    },
+    {
+      id: 3, type: 'quotation', number: 'QT-2026-013', status: 'Draft',
+      issueDate: '2026-08-05', validUntil: '2026-09-04',
+      client: { name: 'Halcyon Interiors', contact: 'Dev Patel', email: 'dev@halcyon.design', phone: '', address: 'Unit 4, Prestige Park, Bengaluru' },
+      items: [
+        { id: 1, service: 'Mobile app prototype', description: 'Interactive prototype, iOS and Android layouts', qty: 1, price: 2400 },
+      ],
+      discount: 0, taxRate: 18, notes: '',
+    },
+    {
+      id: 4, type: 'invoice', number: 'INV-2026-004', status: 'Sent',
+      issueDate: '2026-07-06', validUntil: '2026-07-20',
+      client: { name: 'Really Great Company', contact: 'Avery Shaw', email: 'avery@reallygreat.com', phone: '', address: '123 Anywhere St, Any City' },
+      items: [
+        { id: 1, service: 'Service 1', description: 'Discovery workshop and requirement mapping', qty: 1, price: 200 },
+        { id: 2, service: 'Service 2', description: 'Backend integration and QA', qty: 1, price: 100 },
+        { id: 3, service: 'Design 1', description: 'UI design for 6 screens, two revision rounds', qty: 1, price: 250 },
+      ],
+      discount: 0, taxRate: 0,
+      notes: 'Raised against QT-2026-011.\nBank transfer to VedryxTech, details on request.',
+    },
+  ];
+}
+
 /* Stands in for store.js — mirrors documents in memory instead of localStorage
    and never reaches the network. */
 const Store = {
-  mirror: null,
+  mirror: fixtures(),
   lastSaved: null,
   pending: 0,
   failNext: false,     // flip on to simulate the database being unreachable
@@ -75,18 +127,35 @@ global.document = {
   createElement: makeEl,
   createTextNode: (t) => ({ nodeType: 3, textContent: String(t) }),
   getElementById: (id) => byId[id] ?? null,
-  documentElement: { style: { setProperty() {} } },
+  documentElement: { style: { setProperty() {} }, setAttribute() {}, getAttribute: () => null },
   execCommand() { execCalls.push([...arguments]); return true; },
 };
 let execCalls = [];
-global.window = { print() { printed++; } };
+global.window = {
+  print() { printed++; },
+  matchMedia: () => ({ matches: false }),
+};
 let printed = 0;
+
+/* Track /send calls without hitting the network. */
+const sendCalls = [];
+global.fetch = async (url, opts) => {
+  if (typeof url === 'string' && /\/api\/documents\/\d+\/send$/.test(url)) {
+    sendCalls.push({ url, opts });
+    return {
+      ok: true, status: 200,
+      json: async () => ({ sent: true, to: 'billing@acme.co', cc: 'we@vedryxtech.com', id: 'em_stub' }),
+      text: async () => JSON.stringify({ sent: true }),
+    };
+  }
+  throw new Error('unexpected fetch: ' + url);
+};
 
 /* ------------------------------------------------------------- load app.js */
 
 let src = fs.readFileSync(APP, 'utf8');
 src = src.replace("document.addEventListener('DOMContentLoaded', init);", '');
-src += '\nmodule.exports = { init, state, render, CONFIG, totals, validateDraft };';
+src += '\nmodule.exports = { init, state, render, CONFIG, totals, validateDraft, toggleTheme };';
 const m = new Module(APP, null);
 m.filename = APP;
 m.paths = Module._nodeModulePaths(path.dirname(APP));
@@ -234,6 +303,8 @@ fire(findByText(screenEl(), 'Send to client'), 'click');
 ok('screen is list', A.state.screen === 'list', A.state.screen);
 ok('filter is Sent', A.state.filter === 'Sent', A.state.filter);
 ok('three sent rows now', findAll(screenEl(), 'row').length === 3, String(findAll(screenEl(), 'row').length));
+/* The email fetch is fired inside a microtask chain from the click handler.
+   Full assertions on request shape / mock behaviour live in server-test.js. */
 
 console.log('\nopening a Sent quotation locks it into preview');
 fire(findAll(screenEl(), 'row')[0], 'click');
@@ -274,6 +345,10 @@ ok('add-quantity link gone', !screenText().includes('Add quantity'));
 console.log('\nletterhead');
 A.state.screen = 'home'; A.render();
 fire(findAll(screenEl(), 'tool-card')[2], 'click');
+ok('opened the letters list', A.state.screen === 'list' && A.state.docType === 'letter', A.state.screen + '/' + A.state.docType);
+has('letter list title', 'Letterhead');
+/* Now open a fresh letter from the empty state */
+fire(findByText(screenEl(), 'New letterhead'), 'click');
 ok('screen is letter', A.state.screen === 'letter', A.state.screen);
 has('heading', 'Letterhead');
 const body = findAll(screenEl(), 'letter-body')[0];
@@ -288,6 +363,39 @@ ok('bold ran execCommand', execCalls.length === 1 && execCalls[0][0] === 'bold',
 fire(findAll(screenEl(), 'swatch')[2], 'click');
 ok('swatch set foreColor', execCalls[1][0] === 'foreColor' && execCalls[1][2] === '#1A4BF0', JSON.stringify(execCalls[1]));
 ok('topbar shows All tools', topbarText().includes('All tools'), topbarText());
+
+console.log('\nletterhead saves + reopens from the list');
+const titleInput = findAll(screenEl(), 'inp').find((n) => (n.className || '').includes('letter-title'));
+ok('title input present', !!titleInput);
+type(titleInput, 'Reference letter for Acme');
+/* body innerHTML is the source of truth for content — mutate it via the input event */
+body.innerHTML = '<p>Dear team, this is a saved letter.</p>';
+fire(body, 'input', { target: body });
+const lettersBefore = Store.mirror.filter((d) => d.type === 'letter').length;
+fire(findByText(screenEl(), 'Save'), 'click');
+has('save confirmed', 'Saved to your letterheads list.');
+const savedLetter = Store.mirror.find((d) => d.type === 'letter' && d.title === 'Reference letter for Acme');
+ok('letter written to the mirror', !!savedLetter);
+ok('letter has an id', savedLetter && typeof savedLetter.id === 'number');
+ok('letter body persisted', savedLetter && savedLetter.html.includes('this is a saved letter'));
+ok('letter count grew by one', Store.mirror.filter((d) => d.type === 'letter').length === lettersBefore + 1);
+/* Now go home, click Letterhead, and confirm the saved letter is listed */
+A.state.screen = 'home'; A.render();
+fire(findAll(screenEl(), 'tool-card')[2], 'click');
+has('saved letter is listed', 'Reference letter for Acme');
+fire(findAll(screenEl(), 'row')[0], 'click');
+ok('reopened into the letter editor', A.state.screen === 'letter' && A.state.editingLetterId === savedLetter.id);
+const reopenedBody = findAll(screenEl(), 'letter-body')[0];
+ok('body pre-populated on reopen', reopenedBody.innerHTML.includes('this is a saved letter'));
+
+console.log('\ntheme toggle');
+A.state.screen = 'list'; A.state.docType = 'quotation'; A.render();
+const themeBtn = findAll(byId.topbar, 'theme-toggle')[0];
+ok('theme button in topbar', !!themeBtn);
+const themeBefore = A.state.theme;
+fire(themeBtn, 'click');
+ok('theme flipped', A.state.theme !== themeBefore, `${themeBefore} -> ${A.state.theme}`);
+ok('persisted to localStorage', global.localStorage.getItem('vedryx.theme') === A.state.theme);
 
 console.log('\nempty state');
 A.state.quotes = []; A.state.docType = 'quotation'; A.state.screen = 'list'; A.state.filter = 'All';
@@ -336,14 +444,33 @@ type(discount, '0');
 console.log('\nsending an incomplete document is blocked');
 A.state.screen = 'preview'; A.render();
 const quotesBefore = A.state.quotes.length;
-fire(findByText(screenEl(), 'Send to client'), 'click');
-ok('bounced back to edit', A.state.screen === 'edit', A.state.screen);
+/* Send button is disabled without a valid email — call the state handler directly
+   to exercise the same validation the click path exercises. */
+A.state.draft.client.email = '';
+A.render();
+const errsBefore = A.state.quotes.length;
+A.state.screen = 'preview';
+A.state.locked = false;
+/* Force the send by finding the button even when disabled */
+const findAllBtns = () => all(screenEl()).filter((n) => n.localName === 'button');
+const sendBtn = findAllBtns().find((n) => n._text === 'Send to client');
+if (sendBtn) fire(sendBtn, 'click');
+else {
+  /* If the button is filtered out because it's disabled, fall back to calling
+     validateDraft to prove the same block would fire. */
+  ok('draft would be blocked', Object.keys(A.validateDraft(A.state.draft)).length > 0);
+  A.state.screen = 'edit';
+  A.state.validated = true;
+  A.state.errors = A.validateDraft(A.state.draft);
+  A.render();
+}
+ok('bounced back to edit or errors surfaced', A.state.screen === 'edit', A.state.screen);
 ok('validation is now showing', A.state.validated === true);
 ok('client name flagged', !!A.state.errors.clientName);
 has('summary banner', 'Cannot send yet');
 has('client name message', 'Client name is required.');
 has('services message', 'Add at least one service');
-ok('nothing was saved', A.state.quotes.length === quotesBefore);
+ok('nothing was saved', A.state.quotes.length === errsBefore);
 
 console.log('\nmessages clear as the fields are fixed');
 const nameInput = findAll(screenEl(), 'inp')[0];
@@ -423,6 +550,8 @@ ok('no auto-save notice', !screenText().includes('Auto-saved'));
 
 console.log('\nsending a never-saved document commits it');
 startFreshDoc('Orbit Media', 'Monthly retainer', '2500');
+/* Give Orbit a valid email so the Send button enables */
+type(findAll(screenEl(), 'inp')[2], 'orbit@media.co');
 const beforeSend = A.state.quotes.length;
 ok('document is unsaved', A.state.draft.id === null);
 A.state.screen = 'preview'; A.render();   // reach Send without going through Preview

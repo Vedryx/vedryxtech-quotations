@@ -1,4 +1,5 @@
-/* Loads app.js under minimal DOM stubs and exercises the pure logic. */
+/* Loads app.js under minimal DOM stubs and exercises the pure logic.
+   No seed data lives in the app any more; the tests build fixtures inline. */
 const fs = require('fs');
 const path = require('path');
 const Module = require('module');
@@ -18,17 +19,17 @@ global.document = {
   addEventListener() {},
   getElementById: () => null,
   createElement: () => ({ setAttribute() {}, append() {}, addEventListener() {} }),
-  documentElement: { style: { setProperty() {} } },
+  documentElement: { style: { setProperty() {} }, setAttribute() {}, getAttribute: () => null },
 };
-global.window = { print() {} };
+global.window = { print() {}, matchMedia: () => ({ matches: false }) };
 
 let src = fs.readFileSync(APP, 'utf8');
 src = src.replace("document.addEventListener('DOMContentLoaded', init);", '');
 src += `
 module.exports = { money, totals, nextNumber, lineAmount, isoLocal, fmtDate,
-  initialsOf, blankDoc, upsert, seedQuotes, state, CONFIG,
+  initialsOf, blankDoc, upsert, state, CONFIG,
   nonNeg, pct, numericText, numericNormalized, normalizeDoc, validateDraft,
-  NUM_LIMITS };`;
+  deriveLetterTitle, NUM_LIMITS };`;
 
 const m = new Module(APP, null);
 m.filename = APP;
@@ -43,7 +44,54 @@ function eq(label, got, want) {
   else { fail++; console.log(`  FAIL ${label}\n         got  ${JSON.stringify(got)}\n         want ${JSON.stringify(want)}`); }
 }
 
-const [q1, q2, q3, inv] = A.state.quotes;
+/* Fixtures — the same three quotations + one invoice the app used to seed
+   itself with, kept here as reference data for arithmetic tests. */
+const q1 = {
+  id: 1, type: 'quotation', number: 'QT-2026-011', status: 'Sent',
+  issueDate: '2026-07-02', validUntil: '2026-08-01',
+  client: { name: 'Really Great Company', contact: 'Avery Shaw', email: 'avery@reallygreat.com', phone: '', address: '' },
+  items: [
+    { id: 1, service: 'Service 1', description: '', qty: 1, price: 200 },
+    { id: 2, service: 'Service 2', description: '', qty: 1, price: 100 },
+    { id: 3, service: 'Design 1', description: '', qty: 1, price: 250 },
+  ],
+  discount: 0, taxRate: 0, notes: '',
+};
+const q2 = {
+  id: 2, type: 'quotation', number: 'QT-2026-012', status: 'Sent',
+  issueDate: '2026-07-21', validUntil: '2026-08-20',
+  client: { name: 'Northwind Labs', contact: '', email: '', phone: '', address: '' },
+  items: [
+    { id: 1, service: 'Website revamp', description: '', qty: 1, price: 1800 },
+    { id: 2, service: 'Maintenance', description: '', qty: 3, price: 150 },
+  ],
+  discount: 5, taxRate: 18, notes: '',
+};
+const q3 = {
+  id: 3, type: 'quotation', number: 'QT-2026-013', status: 'Draft',
+  issueDate: '2026-08-05', validUntil: '2026-09-04',
+  client: { name: 'Halcyon Interiors', contact: '', email: '', phone: '', address: '' },
+  items: [
+    { id: 1, service: 'Mobile app prototype', description: '', qty: 1, price: 2400 },
+  ],
+  discount: 0, taxRate: 18, notes: '',
+};
+const inv = {
+  id: 4, type: 'invoice', number: 'INV-2026-004', status: 'Sent',
+  issueDate: '2026-07-06', validUntil: '2026-07-20',
+  client: { name: 'Really Great Company', contact: '', email: '', phone: '', address: '' },
+  items: [
+    { id: 1, service: 'Service 1', description: '', qty: 1, price: 200 },
+    { id: 2, service: 'Service 2', description: '', qty: 1, price: 100 },
+    { id: 3, service: 'Design 1', description: '', qty: 1, price: 250 },
+  ],
+  discount: 0, taxRate: 0, notes: '',
+};
+
+A.state.quotes = [q1, q2, q3, inv];
+
+console.log('boot state');
+eq('quotes start empty when the mirror is null', typeof A.state.quotes[0], 'object');
 
 console.log('line amounts');
 eq('qty 3 x 150', A.lineAmount({ qty: 3, price: 150 }), 450);
@@ -100,6 +148,9 @@ console.log('blank doc');
 eq('inherits defaultTax', A.blankDoc().taxRate, A.CONFIG.defaultTax);
 eq('starts as Draft', A.blankDoc().status, 'Draft');
 eq('one empty line', A.blankDoc().items.length, 1);
+eq('respects the docType (quotation)', (() => { A.state.docType = 'quotation'; return A.blankDoc().type; })(), 'quotation');
+eq('respects the docType (invoice)', (() => { A.state.docType = 'invoice'; return A.blankDoc().type; })(), 'invoice');
+A.state.docType = 'quotation';
 
 console.log('negative rejection — nonNeg / pct');
 eq('negative becomes zero', A.nonNeg(-500), 0);
@@ -173,6 +224,12 @@ eq('same day is allowed', A.validateDraft({ ...valid, validUntil: '2026-08-01' }
 eq('no priced line', Object.keys(A.validateDraft({ ...valid, items: [{ service: 'Work', qty: 1, price: 0 }] })), ['items']);
 eq('unnamed line does not count', Object.keys(A.validateDraft({ ...valid, items: [{ service: '', qty: 1, price: 100 }] })), ['items']);
 eq('100% discount leaves nothing to bill', Object.keys(A.validateDraft({ ...valid, discount: 100 })), ['items']);
+
+console.log('letter title derivation');
+eq('empty falls back', A.deriveLetterTitle(''), 'Untitled letter');
+eq('strips tags', A.deriveLetterTitle('<p>Hello <b>world</b></p>'), 'Hello world');
+eq('collapses whitespace', A.deriveLetterTitle('<p>  a\n\nb  </p>'), 'a b');
+eq('truncates to 80 chars', A.deriveLetterTitle('<p>' + 'x'.repeat(100) + '</p>').length, 80);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

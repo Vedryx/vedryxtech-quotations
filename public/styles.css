@@ -583,3 +583,156 @@ textarea.inp.notes {
 }
 
 @page { margin: 12mm; }
+
+/* ------------------------------------------------------------ theme toggle */
+
+.btn-icon {
+  border: 1px solid var(--line-2); background: #fff; color: var(--ink);
+  width: 34px; height: 34px; flex: none;
+  border-radius: 10px; cursor: pointer;
+  font-weight: 700; font-size: 15px; line-height: 1;
+}
+.btn-icon:hover { background: var(--fill); }
+.theme-toggle { font-size: 16px; }
+
+/* letter title input, sits above the letter tools */
+.letter-title-row {
+  max-width: 900px; margin: 0 auto 12px;
+}
+.inp.letter-title {
+  font-weight: 700; font-size: 15px;
+}
+
+/* ---------------------------------------------------------------- dark mode
+   Applied via [data-theme="dark"] on <html>. The printable surfaces
+   (.doc-sheet, .letter-sheet) stay light so PDFs / prints render on white
+   regardless of the chrome theme — their CSS custom properties are
+   re-declared inside those scopes below. */
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --ink: #F2F4F7;
+  --ink-soft: #C9CFD8;
+  --page: #0E1116;
+
+  --text-2: #C2C8D0;
+  --text-3: #99A0AA;
+  --text-4: #7A818C;
+  --text-5: #7A818C;
+  --text-6: #5D636C;
+  --placeholder: #5D636C;
+
+  --line: #262A32;
+  --line-2: #2F343D;
+  --line-3: #22262D;
+  --line-strong: #3A4049;
+  --line-strong-2: #333941;
+
+  --fill: #1A1D24;
+  --fill-2: #1D2027;
+  --fill-3: #17191F;
+  --fill-4: #22252C;
+
+  --link-hover: #7DA1FF;
+  --accent: #F2F4F7;
+}
+
+:root[data-theme="dark"] body { background: var(--page); color: var(--ink); }
+
+/* Surfaces that used a hard-coded #fff in the light theme — repoint at a
+   dark surface tone in dark mode. */
+:root[data-theme="dark"] .topbar {
+  background: rgba(20, 22, 28, .88);
+  border-bottom-color: var(--line);
+}
+:root[data-theme="dark"] .card,
+:root[data-theme="dark"] .tool-card,
+:root[data-theme="dark"] .row,
+:root[data-theme="dark"] .stat,
+:root[data-theme="dark"] .empty,
+:root[data-theme="dark"] .btn-outline,
+:root[data-theme="dark"] .btn-back,
+:root[data-theme="dark"] .btn-icon,
+:root[data-theme="dark"] .btn-invoice,
+:root[data-theme="dark"] .chip-filter,
+:root[data-theme="dark"] .inp,
+:root[data-theme="dark"] .item,
+:root[data-theme="dark"] .item-service,
+:root[data-theme="dark"] .item-desc,
+:root[data-theme="dark"] .item-remove,
+:root[data-theme="dark"] .letter-tools,
+:root[data-theme="dark"] .letter-select,
+:root[data-theme="dark"] .fmt-btn {
+  background: var(--fill-3);
+  color: var(--ink);
+  border-color: var(--line);
+}
+
+:root[data-theme="dark"] .btn-dark {
+  background: #F2F4F7; color: #14171F;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .5);
+}
+:root[data-theme="dark"] .btn-dark:hover { background: #C9CFD8; }
+:root[data-theme="dark"] .chip-filter.is-active {
+  background: #F2F4F7; color: #14171F; border-color: #F2F4F7;
+}
+:root[data-theme="dark"] .chip-sent { background: #F2F4F7; color: #14171F; }
+:root[data-theme="dark"] .chip-draft { background: var(--fill); color: var(--text-3); }
+
+/* Notes / banners — pick darker, tinted equivalents so they read on the dark page. */
+:root[data-theme="dark"] .sync-note,
+:root[data-theme="dark"] .offline-pill {
+  background: #3A2B0E; color: #FFDF99; border-color: #5B4310;
+}
+:root[data-theme="dark"] .saved-note {
+  background: #103A20; color: #A4E1BB; border-color: #1D5B36;
+}
+:root[data-theme="dark"] .error-note,
+:root[data-theme="dark"] .field-error {
+  color: #FFB4C0;
+}
+:root[data-theme="dark"] .error-note {
+  background: #3A1620; border-color: #6B2634;
+}
+:root[data-theme="dark"] .locked-note {
+  background: var(--fill); border-color: var(--line-2); color: var(--text-3);
+}
+:root[data-theme="dark"] .item-remove:hover {
+  color: #FFB4C0; border-color: #6B2634;
+}
+
+/* Printable surfaces stay LIGHT in dark chrome. This is why re-declaring the
+   custom properties inside .doc-sheet / .letter-sheet matters — every element
+   inside them inherits these light values via var(). */
+:root[data-theme="dark"] .doc-sheet,
+:root[data-theme="dark"] .letter-sheet {
+  color-scheme: light;
+  color: #14171F; background: #fff;
+  border-color: #E8EBEF;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .55);
+
+  --ink: #14171F;
+  --ink-soft: #333846;
+  --page: #F4F5F7;
+
+  --text-2: #40454E;
+  --text-3: #5B6270;
+  --text-4: #7A818C;
+  --text-5: #8A9099;
+  --text-6: #A0A6AF;
+  --placeholder: #B4BAC2;
+
+  --line: #E8EBEF;
+  --line-2: #E2E5EA;
+  --line-3: #EDF0F4;
+  --line-strong: #D6DBE3;
+  --line-strong-2: #DADDE2;
+
+  --fill: #F1F3F6;
+  --fill-2: #F0F1F3;
+  --fill-3: #FAFBFC;
+  --fill-4: #E5E7EA;
+}
+:root[data-theme="dark"] .doc-grand { background: #14171F; color: #fff; }
+
