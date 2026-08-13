@@ -72,6 +72,12 @@ window.Store = (function () {
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (res.status === 401) {
+      // Session expired or signed out in another tab — reload so the server's
+      // gate serves the login screen instead of leaving the app half-dead.
+      window.location.reload();
+      throw new Error('session expired');
+    }
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
       throw new Error(detail.detail || detail.error || `HTTP ${res.status}`);

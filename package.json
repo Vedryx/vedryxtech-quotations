@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
     "dev": "node --env-file-if-exists=.env --watch server.js",
-    "test": "node test/smoke.js && node test/render-test.js"
+    "start:local": "node --env-file-if-exists=.env.local server.js",
+    "dev:local": "node --env-file-if-exists=.env.local --watch server.js",
+    "test": "node test/smoke.js && node test/render-test.js && node test/store-test.js && node test/server-test.js"
   },
   "dependencies": {
     "express": "^4.21.2",

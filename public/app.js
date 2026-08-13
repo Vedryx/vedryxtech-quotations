@@ -17,64 +17,15 @@ const CONFIG = {
   defaultTax: 18,           // 0–30 (%)
 };
 
-/* ------------------------------------------------------------- seed record */
-
-function seedQuotes() {
-  return [
-    {
-      id: 1, type: 'quotation', number: 'QT-2026-011', status: 'Sent',
-      issueDate: '2026-07-02', validUntil: '2026-08-01',
-      client: { name: 'Really Great Company', contact: 'Avery Shaw', email: 'avery@reallygreat.com', phone: '', address: '123 Anywhere St, Any City' },
-      items: [
-        { id: 1, service: 'Service 1', description: 'Discovery workshop and requirement mapping', qty: 1, price: 200 },
-        { id: 2, service: 'Service 2', description: 'Backend integration and QA', qty: 1, price: 100 },
-        { id: 3, service: 'Design 1', description: 'UI design for 6 screens, two revision rounds', qty: 1, price: 250 },
-      ],
-      discount: 0, taxRate: 0,
-      notes: '50% advance to begin, balance on delivery.\nQuotation valid for 30 days.',
-    },
-    {
-      id: 2, type: 'quotation', number: 'QT-2026-012', status: 'Sent',
-      issueDate: '2026-07-21', validUntil: '2026-08-20',
-      client: { name: 'Northwind Labs', contact: 'Rhea Menon', email: 'rhea@northwind.io', phone: '', address: '88 Harbour Road, Kochi' },
-      items: [
-        { id: 1, service: 'Website revamp', description: 'Marketing site, 8 pages, CMS setup', qty: 1, price: 1800 },
-        { id: 2, service: 'Maintenance', description: 'Monthly retainer, 3 months', qty: 3, price: 150 },
-      ],
-      discount: 5, taxRate: 18,
-      notes: 'Hosting billed separately at actuals.',
-    },
-    {
-      id: 3, type: 'quotation', number: 'QT-2026-013', status: 'Draft',
-      issueDate: '2026-08-05', validUntil: '2026-09-04',
-      client: { name: 'Halcyon Interiors', contact: 'Dev Patel', email: 'dev@halcyon.design', phone: '', address: 'Unit 4, Prestige Park, Bengaluru' },
-      items: [
-        { id: 1, service: 'Mobile app prototype', description: 'Interactive prototype, iOS and Android layouts', qty: 1, price: 2400 },
-      ],
-      discount: 0, taxRate: 18, notes: '',
-    },
-    {
-      id: 4, type: 'invoice', number: 'INV-2026-004', status: 'Sent',
-      issueDate: '2026-07-06', validUntil: '2026-07-20',
-      client: { name: 'Really Great Company', contact: 'Avery Shaw', email: 'avery@reallygreat.com', phone: '', address: '123 Anywhere St, Any City' },
-      items: [
-        { id: 1, service: 'Service 1', description: 'Discovery workshop and requirement mapping', qty: 1, price: 200 },
-        { id: 2, service: 'Service 2', description: 'Backend integration and QA', qty: 1, price: 100 },
-        { id: 3, service: 'Design 1', description: 'UI design for 6 screens, two revision rounds', qty: 1, price: 250 },
-      ],
-      discount: 0, taxRate: 0,
-      notes: 'Raised against QT-2026-011.\nBank transfer to VedryxTech, details on request.',
-    },
-  ];
-}
+const THEME_KEY = 'vedryx.theme';
 
 /* ---------------------------------------------------------------- storage */
 
 /* Synchronous first paint from the local mirror; the server is consulted just
-   after boot and wins if it answers. See store.js. */
+   after boot and wins if it answers. See store.js. An empty database is fine —
+   the app has no seed content of its own. */
 function loadQuotes() {
-  const local = Store.readLocal();
-  return local && local.length ? local : seedQuotes();
+  return Store.readLocal() || [];
 }
 
 /* Mirror locally right away, then push the one changed document to MongoDB.
@@ -237,7 +188,8 @@ function blankDoc() {
   const today = new Date();
   const later = new Date(today.getTime() + 30 * 864e5);
   return {
-    id: null, type: state.docType, number: nextNumber(), status: 'Draft',
+    id: null, type: state.docType === 'invoice' ? 'invoice' : 'quotation',
+    number: nextNumber(), status: 'Draft',
     issueDate: isoLocal(today), validUntil: isoLocal(later),
     client: { name: '', contact: '', email: '', phone: '', address: '' },
     items: [{ id: Date.now(), service: '', description: '', qty: 1, price: 0 }],
@@ -273,18 +225,24 @@ function h(tag, props, ...kids) {
 
 const state = {
   screen: 'home',        // home | list | edit | preview | letter
-  docType: 'quotation',  // quotation | invoice
-  filter: 'All',         // All | Draft | Sent
+  docType: 'quotation',  // quotation | invoice | letter
+  filter: 'All',         // All | Draft | Sent (quotations/invoices only)
   saved: false,
-  editingId: null,
+  editingId: null,       // id of the quotation/invoice being edited
   locked: false,
   numberTouched: false,
   quotes: loadQuotes(),
   draft: null,
+  editingLetterId: null, // id of the letter being edited (null = new)
+  letterTitle: '',
   letterHTML: null,
+  letterSaved: false,
   errors: {},        // fieldKey -> message, from validateDraft
   validated: false,  // messages stay hidden until a send is attempted
   autoSaved: false,  // set when Preview committed a previously unsaved document
+  theme: 'light',    // 'light' | 'dark' — persisted to localStorage
+  sending: false,    // true while /send is in flight
+  sendResult: null,  // { ok, message } surfaced next to the send button
 };
 
 function setState(patch) {
@@ -305,7 +263,8 @@ function setDraft(fn, { rerender = false } = {}) {
 /* ------------------------------------------------------------------- routing */
 
 const isInvoice = () => state.docType === 'invoice';
-const listTitle = () => (isInvoice() ? 'Invoices' : 'Quotations');
+const isLetter  = () => state.docType === 'letter';
+const listTitle = () => (isLetter() ? 'Letterhead' : isInvoice() ? 'Invoices' : 'Quotations');
 
 const goHome = () => setState({ screen: 'home', locked: false });
 const goList = () => setState({ screen: 'list', locked: false });
@@ -319,16 +278,40 @@ function newQuote() {
   setState({
     draft: blankDoc(), editingId: null, screen: 'edit', saved: false,
     numberTouched: false, locked: false, errors: {}, validated: false,
+    sendResult: null, sending: false,
   });
 }
 
+function newLetter() {
+  setState({
+    screen: 'letter', docType: 'letter',
+    editingLetterId: null, letterTitle: '', letterHTML: null, letterSaved: false,
+  });
+}
+
+/* Router used by the topbar "New" button and empty-state CTAs. */
+function newDoc() {
+  if (isLetter()) return newLetter();
+  return newQuote();
+}
+
 function openDoc(q) {
+  if (q.type === 'letter') return openLetter(q);
   const lock = !isInvoice() && q.status === 'Sent';
   setState({
     draft: clone(q), editingId: q.id, saved: false,
     numberTouched: true, locked: lock,
     screen: lock ? 'preview' : 'edit',
     errors: {}, validated: false,
+    sendResult: null, sending: false,
+  });
+}
+
+function openLetter(q) {
+  setState({
+    screen: 'letter', docType: 'letter',
+    editingLetterId: q.id, letterTitle: q.title || '', letterHTML: q.html || '',
+    letterSaved: false,
   });
 }
 
@@ -350,11 +333,13 @@ function upsert(q) {
 function commit(q, patch) {
   state.quotes = upsert(q);                 // assigns q.id when the doc is new
   setState({ draft: q, editingId: q.id, ...patch });
-  persist(q).then((ok) => {
-    if (ok) return;
-    // Surface the failure without disturbing a form the user may be typing in.
-    if (state.screen === 'list') render();
-    else renderTopbar();
+  return persist(q).then((ok) => {
+    if (!ok) {
+      // Surface the failure without disturbing a form the user may be typing in.
+      if (state.screen === 'list') render();
+      else renderTopbar();
+    }
+    return ok;
   });
 }
 
@@ -386,7 +371,8 @@ function goPreview() {
   commit(q, { screen: 'preview', saved: false, autoSaved: wasUnsaved });
 }
 
-/* Sending is the locking, client-facing step, so it validates first. */
+/* Sending is the locking, client-facing step, so it validates first, then
+   fires the transactional email via /api/documents/:id/send. */
 function sendQuote() {
   const d = state.draft || blankDoc();
   const errors = validateDraft(d);
@@ -399,10 +385,45 @@ function sendQuote() {
   const q = normalizeDoc(clone(d));
   q.status = 'Sent';
   if (!state.numberTouched) q.number = q.number || nextNumber();
+
+  state.sending = true;
+  state.sendResult = null;
+
   commit(q, {
     screen: 'list', filter: 'Sent', locked: false,
     errors: {}, validated: false, autoSaved: false,
+  }).then((ok) => {
+    /* If the commit itself did not land, the email would have nothing to look
+       up server-side — surface the failure and stop. */
+    if (!ok) {
+      state.sending = false;
+      state.sendResult = { ok: false, message: `Saved locally, but the database is offline — email skipped.` };
+      render();
+      return;
+    }
+    return sendDocEmail(q.id).then((res) => {
+      state.sending = false;
+      state.sendResult = res;
+      render();
+    });
   });
+}
+
+/* POST /api/documents/:id/send. Returns { ok, message } — never throws. */
+function sendDocEmail(id) {
+  return fetch(`/api/documents/${id}/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ currency: CONFIG.currency }),
+  }).then((r) => r.json().then((body) => ({ status: r.status, body })))
+    .then(({ status, body }) => {
+      if (status >= 200 && status < 300 && body && body.sent) {
+        return { ok: true, message: `Sent to ${body.to}${body.cc ? ` (cc ${body.cc})` : ''}.` };
+      }
+      const detail = body && (body.error || body.detail) || `HTTP ${status}`;
+      return { ok: false, message: `Could not send email: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}` };
+    })
+    .catch((err) => ({ ok: false, message: `Could not reach the email service: ${err.message}` }));
 }
 
 function focusFirstError() {
@@ -418,6 +439,7 @@ function duplicateQuote() {
   setState({
     draft: q, editingId: null, locked: false, numberTouched: false,
     screen: 'edit', saved: false, errors: {}, validated: false,
+    sendResult: null, sending: false,
   });
 }
 
@@ -436,7 +458,39 @@ function invoiceFrom(src) {
   setState({
     draft: q, editingId: null, numberTouched: false, locked: false, saved: false,
     screen: 'edit', filter: 'All', errors: {}, validated: false,
+    sendResult: null, sending: false,
   });
+}
+
+/* ------------------------------------------------------------------ theme */
+
+function applyTheme(mode) {
+  const t = mode === 'dark' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', t);
+  return t;
+}
+
+function toggleTheme() {
+  const next = state.theme === 'dark' ? 'light' : 'dark';
+  state.theme = applyTheme(next);
+  try { localStorage.setItem(THEME_KEY, state.theme); } catch { /* private mode */ }
+  render();
+}
+
+function initTheme() {
+  let stored = null;
+  try { stored = localStorage.getItem(THEME_KEY); } catch { /* ignore */ }
+  const prefersDark = typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  state.theme = applyTheme(stored || (prefersDark ? 'dark' : 'light'));
+}
+
+/* Clears the session cookie server-side, then reloads — the gate then serves
+   the login screen. No-op-safe when the app runs without a password. */
+async function logout() {
+  try { await fetch('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
+  window.location.reload();
 }
 
 /* --------------------------------------------------------------- top bar */
@@ -444,6 +498,13 @@ function invoiceFrom(src) {
 function renderTopbar() {
   const showChrome = ['list', 'edit', 'preview'].includes(state.screen);
   const store = Store.status();
+  const themeBtn = h('button', {
+    class: 'btn-icon theme-toggle',
+    title: state.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode',
+    'aria-label': state.theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode',
+    onclick: toggleTheme,
+    text: state.theme === 'dark' ? '☀' : '☾',
+  });
   const inner = h('div', { class: 'topbar-inner' },
     h('img', { class: 'topbar-logo', src: 'assets/logo.png', alt: 'VedryxTech', onclick: goHome }),
     h('div', { class: 'spacer' }),
@@ -454,8 +515,16 @@ function renderTopbar() {
         ? `Offline — ${store.pending} not in database`
         : 'Offline — saved locally',
     }),
+    themeBtn,
+    h('button', {
+      class: 'btn-icon',
+      title: 'Sign out',
+      'aria-label': 'Sign out',
+      onclick: logout,
+      text: '⎋',
+    }),
     showChrome && h('button', { class: 'btn-ghost', onclick: goList, text: listTitle() }),
-    showChrome && h('button', { class: 'btn-dark', onclick: newQuote, text: 'New' }),
+    showChrome && h('button', { class: 'btn-dark', onclick: newDoc, text: 'New' }),
     state.screen === 'letter' && h('button', { class: 'btn-outline', onclick: goHome, text: 'All tools' }),
   );
   const bar = document.getElementById('topbar');
@@ -466,6 +535,7 @@ function renderTopbar() {
 
 function renderHome() {
   const count = (t) => state.quotes.filter((q) => (q.type || 'quotation') === t).length;
+  const letters = count('letter');
 
   const card = (badge, name, desc, foot, onclick) => h('button', { class: 'tool-card', onclick },
     h('div', { class: 'tool-badge', text: badge }),
@@ -484,7 +554,7 @@ function renderHome() {
       card('I', 'Invoice', 'Bill a client. Raise one from a sent quotation in a click, and edit it any time.',
         `${count('invoice')} saved`, () => openType('invoice')),
       card('L', 'Letterhead', 'Write on branded paper. Full text formatting, nothing else to fill in.',
-        'Blank sheet', () => setState({ screen: 'letter' })),
+        letters ? `${letters} saved` : 'Blank sheet', () => openType('letter')),
     ),
   );
 }
@@ -492,6 +562,8 @@ function renderHome() {
 /* ------------------------------------------------------------------- list */
 
 function renderList() {
+  if (isLetter()) return renderLetterList();
+
   const ofType = state.quotes.filter((q) => (q.type || 'quotation') === state.docType);
   const visible = ofType.filter((q) => state.filter === 'All' || q.status === state.filter).slice().reverse();
   const outstanding = ofType.filter((q) => q.status === 'Sent').reduce((a, q) => a + totals(q).total, 0);
@@ -560,6 +632,46 @@ function renderList() {
       ),
     ),
     filters,
+    rows,
+    empty,
+  );
+}
+
+/* Simpler list for letters: no amounts, no filter chips, no lifecycle. */
+function renderLetterList() {
+  const letters = state.quotes
+    .filter((q) => q.type === 'letter')
+    .slice()
+    .sort((a, b) => (a.updatedAt || '').localeCompare(b.updatedAt || ''))
+    .reverse();
+
+  const rows = h('div', { class: 'rows' }, letters.map((q) => h('div', {
+    class: 'row', role: 'button', tabindex: '0',
+    onclick: () => openLetter(q),
+    onkeydown: (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openLetter(q); }
+    },
+  },
+    h('div', { class: 'row-avatar', text: initialsOf(q.title || 'Letter') }),
+    h('div', { class: 'row-main' },
+      h('div', { class: 'row-client', text: q.title || 'Untitled letter' }),
+      h('div', { class: 'row-meta', text: q.updatedAt ? `Updated ${fmtDate(q.updatedAt.slice(0, 10))}` : 'New' }),
+    ),
+  )));
+
+  const empty = letters.length === 0 && h('div', { class: 'empty' },
+    h('div', { class: 'empty-title', text: 'No letterheads here yet' }),
+    h('div', { class: 'empty-sub', text: 'Write one and it will show up in this list.' }),
+    h('button', { class: 'btn-dark', onclick: newLetter, text: 'New letterhead' }),
+  );
+
+  return h('div', { class: 'list' },
+    h('div', { class: 'list-head' },
+      h('div', null,
+        h('h1', { text: 'Letterhead' }),
+        h('p', { class: 'list-sub', text: `${letters.length} total` }),
+      ),
+    ),
     rows,
     empty,
   );
@@ -877,6 +989,16 @@ function renderPreview() {
   const clientBlock = [d.client.contact, d.client.email, d.client.phone, d.client.address]
     .filter(Boolean).join('\n');
 
+  const canEmail = EMAIL_RE.test(String(d.client.email || '').trim());
+
+  const sendButton = !state.locked && h('button', {
+    class: 'btn-dark',
+    text: state.sending ? 'Sending…' : 'Send to client',
+    disabled: state.sending || !canEmail,
+    title: canEmail ? 'Send this document by email' : 'Add a valid client email address to enable sending.',
+    onclick: sendQuote,
+  });
+
   const bar = h('div', { class: 'preview-bar no-print' },
     h('button', {
       class: 'btn-back', text: '←', title: 'Back',
@@ -884,7 +1006,7 @@ function renderPreview() {
     }),
     h('h1', { text: state.locked ? 'Sent quotation' : 'Preview' }),
     h('button', { class: 'btn-outline', text: 'Download PDF', onclick: () => window.print() }),
-    !state.locked && h('button', { class: 'btn-dark', text: 'Send to client', onclick: sendQuote }),
+    sendButton,
     state.locked && h('button', { class: 'btn-outline', text: 'Duplicate as draft', onclick: duplicateQuote }),
     state.locked && h('button', { class: 'btn-dark', text: 'Create invoice', onclick: () => invoiceFrom(d) }),
   );
@@ -955,6 +1077,18 @@ function renderPreview() {
     ),
   );
 
+  const sendNote = state.sendResult && h('div', {
+    class: (state.sendResult.ok ? 'saved-note' : 'error-note') + ' no-print',
+    style: 'margin-bottom:16px',
+    text: state.sendResult.message,
+  });
+
+  const emailHint = !state.locked && !canEmail && h('div', {
+    class: 'sync-note no-print',
+    style: 'margin-bottom:16px',
+    text: 'Add a valid client email address to enable "Send to client".',
+  });
+
   return h('div', { class: 'preview' },
     bar,
     state.autoSaved && !state.locked && h('div', {
@@ -962,6 +1096,8 @@ function renderPreview() {
       style: 'margin-bottom:16px',
       text: `Auto-saved as a draft (${d.number}) so nothing is lost.`,
     }),
+    sendNote,
+    emailHint,
     state.locked && h('div', {
       class: 'locked-note no-print',
       text: `Sent on ${fmtDate(d.issueDate)} — locked. Duplicate it as a draft to make changes.`,
@@ -1004,15 +1140,44 @@ function defaultLetterHTML() {
     + '<p style="margin:0">Regards,<br>VedryxTech</p>';
 }
 
+/* Derive a fallback title from the first ~80 characters of readable text in
+   the letter body. Used only when the user did not type a title of their own. */
+function deriveLetterTitle(html) {
+  const stripped = String(html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!stripped) return 'Untitled letter';
+  return stripped.slice(0, 80);
+}
+
+function saveLetter() {
+  const html = state.letterHTML ?? defaultLetterHTML();
+  const title = String(state.letterTitle || '').trim() || deriveLetterTitle(html);
+  const doc = {
+    id: state.editingLetterId,
+    type: 'letter',
+    title: title.slice(0, 160),
+    html: String(html).slice(0, 200000),
+    updatedAt: new Date().toISOString(),
+  };
+  commit(doc, { editingLetterId: doc.id, letterTitle: doc.title, letterSaved: true });
+}
+
 function renderLetter() {
   const body = h('div', {
     class: 'letter-body',
     contenteditable: 'true',
     spellcheck: 'true',
-    oninput: (e) => { state.letterHTML = e.target.innerHTML; },
+    oninput: (e) => { state.letterHTML = e.target.innerHTML; state.letterSaved = false; },
   });
   body.innerHTML = state.letterHTML ?? defaultLetterHTML();
   letterEl = body;
+
+  const titleInput = h('input', {
+    class: 'inp letter-title',
+    value: state.letterTitle || '',
+    placeholder: 'Title (optional — used to find this letter later)',
+    maxlength: '160',
+    oninput: (e) => { state.letterTitle = e.target.value; state.letterSaved = false; },
+  });
 
   const fontSelect = h('select', {
     class: 'letter-select', title: 'Font',
@@ -1043,9 +1208,17 @@ function renderLetter() {
 
   return h('div', { class: 'letter' },
     h('div', { class: 'letter-bar no-print' },
-      h('h1', { text: 'Letterhead' }),
+      h('button', { class: 'btn-back', onclick: goHome, text: '←', title: 'All tools' }),
+      h('h1', { text: state.editingLetterId ? 'Edit letterhead' : 'Letterhead' }),
       h('button', { class: 'btn-outline', text: 'Download PDF', onclick: () => window.print() }),
+      h('button', { class: 'btn-dark', text: 'Save', onclick: saveLetter }),
     ),
+    h('div', { class: 'letter-title-row no-print' }, titleInput),
+    state.letterSaved && h('div', {
+      class: 'saved-note no-print',
+      style: 'margin-bottom:12px',
+      text: 'Saved to your letterheads list.',
+    }),
     tools,
     h('div', { class: 'doc-sheet letter-sheet' },
       h('div', { class: 'letter-head' },
@@ -1082,6 +1255,7 @@ function render() {
 
 function init() {
   document.documentElement.style.setProperty('--accent', CONFIG.accentColor);
+  initTheme();
   render();
 
   // The local mirror has already painted; ask the database for the real list.
