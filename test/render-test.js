@@ -155,7 +155,7 @@ global.fetch = async (url, opts) => {
 
 let src = fs.readFileSync(APP, 'utf8');
 src = src.replace("document.addEventListener('DOMContentLoaded', init);", '');
-src += '\nmodule.exports = { init, state, render, CONFIG, totals, validateDraft, toggleTheme };';
+src += '\nmodule.exports = { init, state, render, CONFIG, totals, validateDraft, toggleTheme, CURRENCIES, coerceCurrency, blankDoc };';
 const m = new Module(APP, null);
 m.filename = APP;
 m.paths = Module._nodeModulePaths(path.dirname(APP));
@@ -255,6 +255,35 @@ has('quotation no. label', 'Quotation no.');
 has('valid until label', 'Valid until');
 has('total in rail', '$2,832.00');
 
+console.log('\ncurrency selector: dropdown in the editor form');
+const currencySelect = all(screenEl()).find((n) => n.localName === 'select' && n.attrs['aria-label'] === 'Currency');
+ok('currency select rendered', !!currencySelect);
+ok('six options offered', currencySelect && currencySelect.children.length === 6, String(currencySelect && currencySelect.children.length));
+/* h() sets `value` via property (not setAttribute), so read .value on the option. */
+ok('offers INR', currencySelect && currencySelect.children.some((o) => o.value === 'INR'));
+ok('offers JPY', currencySelect && currencySelect.children.some((o) => o.value === 'JPY'));
+ok('offers AED', currencySelect && currencySelect.children.some((o) => o.value === 'AED'));
+/* Change to INR — totals must re-format to ₹ live, and the draft must carry
+   the new code so a save round-trips it. */
+currencySelect.value = 'INR';
+fire(currencySelect, 'change', { target: currencySelect });
+ok('draft currency updated', A.state.draft.currency === 'INR', String(A.state.draft.currency));
+has('total re-rendered in INR', '₹2,832.00');
+ok('no dollar sign left in the totals rail', !findAll(screenEl(), 'total-grand-value')[0]._text.includes('$'), findAll(screenEl(), 'total-grand-value')[0]._text);
+
+console.log('\nswitch to JPY — 0 decimals');
+const currencySelect2 = all(screenEl()).find((n) => n.localName === 'select' && n.attrs['aria-label'] === 'Currency');
+currencySelect2.value = 'JPY';
+fire(currencySelect2, 'change', { target: currencySelect2 });
+ok('draft currency is JPY', A.state.draft.currency === 'JPY');
+has('total in JPY has no decimals', '¥2,832');
+
+console.log('\nswitch back to USD for the remaining tests');
+const currencySelect3 = all(screenEl()).find((n) => n.localName === 'select' && n.attrs['aria-label'] === 'Currency');
+currencySelect3.value = 'USD';
+fire(currencySelect3, 'change', { target: currencySelect3 });
+ok('back on USD', A.state.draft.currency === 'USD');
+
 console.log('\nlive totals: change the tax rate without a re-render');
 const taxInput = all(screenEl()).find((n) => n.attrs.type === 'number' && n.value === 18);
 ok('found tax input', !!taxInput);
@@ -280,6 +309,7 @@ ok('pushed to the database layer', Store.lastSaved && Store.lastSaved.number ===
 const storedDoc = Store.mirror.find((q) => q.number === 'QT-2026-013');
 ok('stored tax survived', storedDoc.taxRate === 10, JSON.stringify(storedDoc.taxRate));
 ok('stored as a number, not the raw input string', typeof storedDoc.taxRate === 'number');
+ok('stored currency survived', storedDoc.currency === 'USD', JSON.stringify(storedDoc.currency));
 
 console.log('\npreview of an unlocked draft');
 fire(findByText(screenEl(), 'Preview'), 'click');
@@ -563,6 +593,41 @@ ok('saved with Sent status', orbit && orbit.status === 'Sent');
 ok('mirrored locally', Store.mirror.some((q) => q.client.name === 'Orbit Media'));
 ok('pushed to the database layer', Store.lastSaved.client.name === 'Orbit Media');
 ok('it appears in the list', screenText().includes('Orbit Media'));
+
+console.log('\nmixed-currency list: each row formats in its own currency');
+A.state.quotes = [
+  { id: 601, type: 'quotation', number: 'QT-INR', status: 'Sent', currency: 'INR',
+    client: { name: 'Mumbai Co' }, items: [{ id: 1, service: 'x', qty: 1, price: 100000 }],
+    discount: 0, taxRate: 0, issueDate: '2026-08-13', validUntil: '2026-09-12', notes: '' },
+  { id: 602, type: 'quotation', number: 'QT-JPY', status: 'Sent', currency: 'JPY',
+    client: { name: 'Tokyo Co' }, items: [{ id: 1, service: 'y', qty: 1, price: 50000 }],
+    discount: 0, taxRate: 0, issueDate: '2026-08-13', validUntil: '2026-09-12', notes: '' },
+  { id: 603, type: 'quotation', number: 'QT-GBP', status: 'Sent', currency: 'GBP',
+    client: { name: 'London Co' }, items: [{ id: 1, service: 'z', qty: 1, price: 750 }],
+    discount: 0, taxRate: 0, issueDate: '2026-08-13', validUntil: '2026-09-12', notes: '' },
+  { id: 604, type: 'quotation', number: 'QT-OLD', status: 'Sent', /* no currency */
+    client: { name: 'Legacy Co' }, items: [{ id: 1, service: 'legacy', qty: 1, price: 42 }],
+    discount: 0, taxRate: 0, issueDate: '2026-08-13', validUntil: '2026-09-12', notes: '' },
+];
+A.state.docType = 'quotation'; A.state.screen = 'list'; A.state.filter = 'Sent';
+A.render();
+const rowAmounts = findAll(screenEl(), 'row-amount').map((n) => n._text);
+ok('INR row shows ₹', rowAmounts.includes('₹100,000.00'), JSON.stringify(rowAmounts));
+ok('JPY row shows ¥ with no decimals', rowAmounts.includes('¥50,000'), JSON.stringify(rowAmounts));
+ok('GBP row shows £', rowAmounts.includes('£750.00'), JSON.stringify(rowAmounts));
+ok('legacy no-currency row defaults to $', rowAmounts.includes('$42.00'), JSON.stringify(rowAmounts));
+
+console.log('\nopening a per-currency doc: totals inherit its currency');
+/* Open the JPY doc directly — the click path is already exercised by earlier
+   tests; here we just care that the editor renders the doc's currency. */
+A.state.editingId = 602;
+A.state.docType = 'quotation';
+A.state.draft = JSON.parse(JSON.stringify(A.state.quotes.find((q) => q.id === 602)));
+A.state.screen = 'edit'; A.state.locked = false;
+A.render();
+has('opened editor shows ¥ in totals', '¥50,000');
+const inheritedSelect = all(screenEl()).find((n) => n.localName === 'select' && n.attrs['aria-label'] === 'Currency');
+ok('currency select reflects the doc', inheritedSelect && inheritedSelect.value === 'JPY', String(inheritedSelect && inheritedSelect.value));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

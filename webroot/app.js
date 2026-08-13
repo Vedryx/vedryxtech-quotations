@@ -10,12 +10,34 @@
 'use strict';
 
 /* ------------------------------------------------------------------ config */
-/* Was the prototype's data-props block (accentColor / currency / defaultTax). */
+/* Was the prototype's data-props block. Currency is now per-document — the
+   default here is only used when a fresh blank doc is created; the editor
+   dropdown lets the user pick per quotation / invoice so a UK client gets £
+   and a UAE client gets AED. */
 const CONFIG = {
   accentColor: '#14171F',   // '#14171F' | '#1A4BF0' | '#0F7B5A' | '#B3521E'
-  currency: '$',            // '$' | '₹' | '€' | '£'
+  currency: 'USD',          // default currency for new docs (ISO 4217)
   defaultTax: 18,           // 0–30 (%)
 };
+
+/* Six ISO 4217 codes the picker offers. Kept in sync with server.js:CURRENCIES.
+   Order matches the dropdown order. `symbol` is only for the option label —
+   the actual money formatting uses Intl.NumberFormat, which chooses the
+   correct symbol + decimals per code (JPY: 0dp, others: 2dp). */
+const CURRENCIES = [
+  { code: 'USD', symbol: '$',   label: '$ USD' },
+  { code: 'INR', symbol: '₹',   label: '₹ INR' },
+  { code: 'EUR', symbol: '€',   label: '€ EUR' },
+  { code: 'AED', symbol: 'AED', label: 'AED' },
+  { code: 'GBP', symbol: '£',   label: '£ GBP' },
+  { code: 'JPY', symbol: '¥',   label: '¥ JPY' },
+];
+const CURRENCY_CODES = CURRENCIES.map((c) => c.code);
+const DEFAULT_CURRENCY = 'USD';
+function coerceCurrency(c) {
+  const up = String(c || '').toUpperCase();
+  return CURRENCY_CODES.includes(up) ? up : DEFAULT_CURRENCY;
+}
 
 const THEME_KEY = 'vedryx.theme';
 
@@ -41,9 +63,15 @@ function persist(changed) {
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
-function money(n) {
+/* Format a number as money in the given ISO currency code. Locale is pinned
+   to en-US so grouping stays consistent on print / preview / email; the code
+   controls symbol + decimals (JPY → "¥1,000", AED → "AED 1,000.00" etc.).
+   Falls back to the active draft's currency, then USD, so old callsites still
+   work while the codebase moves to explicit passing. */
+function money(n, code) {
   const v = Number(n) || 0;
-  return CONFIG.currency + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const currency = coerceCurrency(code ?? state.draft?.currency);
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(v);
 }
 
 /* Local calendar date as YYYY-MM-DD. toISOString() would shift the day for
@@ -190,6 +218,7 @@ function blankDoc() {
   return {
     id: null, type: state.docType === 'invoice' ? 'invoice' : 'quotation',
     number: nextNumber(), status: 'Draft',
+    currency: coerceCurrency(CONFIG.currency),
     issueDate: isoLocal(today), validUntil: isoLocal(later),
     client: { name: '', contact: '', email: '', phone: '', address: '' },
     items: [{ id: Date.now(), service: '', description: '', qty: 1, price: 0 }],
@@ -409,12 +438,14 @@ function sendQuote() {
   });
 }
 
-/* POST /api/documents/:id/send. Returns { ok, message } — never throws. */
+/* POST /api/documents/:id/send. Returns { ok, message } — never throws.
+   No currency field: the server reads it off the persisted doc (see
+   sanitize()), so the emailed copy always matches what was saved. */
 function sendDocEmail(id) {
   return fetch(`/api/documents/${id}/send`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ currency: CONFIG.currency }),
+    body: JSON.stringify({}),
   }).then((r) => r.json().then((body) => ({ status: r.status, body })))
     .then(({ status, body }) => {
       if (status >= 200 && status < 300 && body && body.sent) {
@@ -592,7 +623,9 @@ function renderList() {
         h('div', { class: 'row-meta', text: `${q.number} · ${fmtDate(q.issueDate)}` }),
       ),
       h('div', { class: 'row-right' },
-        h('div', { class: 'row-amount', text: money(totals(q).total) }),
+        /* Each row is formatted in its own document's currency, so a mixed
+           list (£, ₹, $) shows the right symbol per row. */
+        h('div', { class: 'row-amount', text: money(totals(q).total, q.currency) }),
         h('div', { class: 'chip ' + (q.status === 'Sent' ? 'chip-sent' : 'chip-draft'), text: q.status }),
       ),
       canInvoice && h('button', {
@@ -627,7 +660,11 @@ function renderList() {
       h('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' },
         h('div', { class: 'stat' },
           h('div', { class: 'stat-label', text: 'Outstanding' }),
-          h('div', { class: 'stat-value', text: money(outstanding) }),
+          /* Mixed-currency sum is ambiguous — we render the raw numeric total
+             in USD as a rough scoreboard. Not an FX-converted figure; each
+             individual document still shows its own currency in the rows
+             above. Revisit if a real multi-currency dashboard is needed. */
+          h('div', { class: 'stat-value', text: money(outstanding, 'USD') }),
         ),
       ),
     ),
@@ -699,24 +736,25 @@ function refreshDerived() {
   const d = state.draft;
   if (!d || state.screen !== 'edit') return;
   const t = totals(d);
+  const cur = coerceCurrency(d.currency);
 
   d.items.forEach((it, i) => {
     const node = derived.lineAmounts[i];
-    if (node) node.textContent = money(lineAmount(it));
+    if (node) node.textContent = money(lineAmount(it), cur);
   });
 
-  if (derived.subTotal) derived.subTotal.textContent = money(t.sub);
+  if (derived.subTotal) derived.subTotal.textContent = money(t.sub, cur);
   if (derived.discountRow) {
     const show = pct(d.discount) > 0;
     derived.discountRow.style.display = show ? '' : 'none';
     if (show) {
       derived.discountLabel.textContent = `Discount (${pct(d.discount)}%)`;
-      derived.discountText.textContent = '−' + money(t.disc);
+      derived.discountText.textContent = '−' + money(t.disc, cur);
     }
   }
   if (derived.taxLabel) derived.taxLabel.textContent = `Tax (${pct(d.taxRate)}%)`;
-  if (derived.taxText) derived.taxText.textContent = money(t.tax);
-  if (derived.total) derived.total.textContent = money(t.total);
+  if (derived.taxText) derived.taxText.textContent = money(t.tax, cur);
+  if (derived.total) derived.total.textContent = money(t.total, cur);
 
   refreshErrors();
 
@@ -826,6 +864,18 @@ function renderEdit() {
   );
 
   /* ---- document details */
+  const currentCurrency = coerceCurrency(d.currency);
+  const currencySelect = h('select', {
+    class: 'inp', 'aria-label': 'Currency',
+    /* Per-document currency: changing it re-formats live totals + the emailed
+       copy. Re-render (not just refreshDerived) so the new symbol / decimals
+       propagate through every money() callsite on the form. */
+    onchange: (e) => { const v = e.target.value; setDraft((x) => { x.currency = coerceCurrency(v); }, { rerender: true }); },
+  }, CURRENCIES.map((c) => h('option', { value: c.code, text: c.label })));
+  /* Set .value after options are appended so the browser (and the DOM shim
+     used by render-test.js) both pick the right one. */
+  currencySelect.value = currentCurrency;
+
   const detailsCard = h('div', { class: 'card' },
     h('div', { class: 'card-title', text: isInvoice() ? 'Invoice details' : 'Quotation details' }),
     h('div', { class: 'field-grid' },
@@ -841,12 +891,14 @@ function renderEdit() {
       field(isInvoice() ? 'Due date' : 'Valid until',
         h('input', { class: 'inp', type: 'date', value: d.validUntil, min: d.issueDate || null, oninput: onField('validUntil') }),
         { errKey: 'validUntil' }),
+      field('Currency', currencySelect),
     ),
   );
 
   /* ---- line items */
+  const cur = coerceCurrency(d.currency);
   const itemNodes = d.items.map((it, i) => {
-    const amount = h('div', { class: 'item-amount-value', text: money(lineAmount(it)) });
+    const amount = h('div', { class: 'item-amount-value', text: money(lineAmount(it), cur) });
     derived.lineAmounts[i] = amount;
     const hasQty = nonNeg(it.qty) > 0;
 
@@ -917,12 +969,12 @@ function renderEdit() {
   );
 
   /* ---- totals rail */
-  derived.subTotal = h('span', { text: money(t.sub) });
+  derived.subTotal = h('span', { text: money(t.sub, cur) });
   derived.discountLabel = h('span', { text: `Discount (${pct(d.discount)}%)` });
-  derived.discountText = h('span', { text: '−' + money(t.disc) });
+  derived.discountText = h('span', { text: '−' + money(t.disc, cur) });
   derived.taxLabel = h('span', { text: `Tax (${pct(d.taxRate)}%)` });
-  derived.taxText = h('span', { text: money(t.tax) });
-  derived.total = h('span', { class: 'total-grand-value', text: money(t.total) });
+  derived.taxText = h('span', { text: money(t.tax, cur) });
+  derived.total = h('span', { class: 'total-grand-value', text: money(t.total, cur) });
 
   derived.discountRow = h('div', {
     class: 'total-row',
@@ -976,14 +1028,15 @@ function renderPreview() {
   const d = state.draft;
   const t = totals(d);
   const hasDiscount = pct(d.discount) > 0;
+  const cur = coerceCurrency(d.currency);
 
   const docItems = d.items
     .filter((i) => i.service || nonNeg(i.price) > 0)
     .map((it) => ({
       service: it.service || 'Untitled service',
       description: it.description || '',
-      qtyLine: nonNeg(it.qty) > 1 ? `${nonNeg(it.qty)} × ${money(it.price)}` : '',
-      amountText: money(lineAmount(it)),
+      qtyLine: nonNeg(it.qty) > 1 ? `${nonNeg(it.qty)} × ${money(it.price, cur)}` : '',
+      amountText: money(lineAmount(it), cur),
     }));
 
   const clientBlock = [d.client.contact, d.client.email, d.client.phone, d.client.address]
@@ -1051,18 +1104,18 @@ function renderPreview() {
     ),
     h('div', { class: 'doc-totals' },
       h('div', { class: 'doc-totals-inner' },
-        h('div', { class: 'doc-total-row' }, h('span', { text: 'Sub-Total' }), h('span', { text: money(t.sub) })),
+        h('div', { class: 'doc-total-row' }, h('span', { text: 'Sub-Total' }), h('span', { text: money(t.sub, cur) })),
         hasDiscount && h('div', { class: 'doc-total-row' },
           h('span', { text: `Discount (${pct(d.discount)}%)` }),
-          h('span', { text: '−' + money(t.disc) }),
+          h('span', { text: '−' + money(t.disc, cur) }),
         ),
         h('div', { class: 'doc-total-row' },
           h('span', { text: `Tax (${pct(d.taxRate)}%)` }),
-          h('span', { text: money(t.tax) }),
+          h('span', { text: money(t.tax, cur) }),
         ),
         h('div', { class: 'doc-grand' },
           h('span', { class: 'doc-grand-label', text: 'TOTAL' }),
-          h('span', { class: 'doc-grand-value', text: money(t.total) }),
+          h('span', { class: 'doc-grand-value', text: money(t.total, cur) }),
         ),
       ),
     ),
