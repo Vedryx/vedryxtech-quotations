@@ -1,10 +1,10 @@
-/* Exercises public/store.js against a fake API and a fake localStorage.
+/* Exercises webroot/store.js against a fake API and a fake localStorage.
    The point of interest is that a sync must never drop a document the server has
    not seen — that was a real data-loss path. */
 const fs = require('fs');
 const path = require('path');
 
-const STORE = path.join(__dirname, '..', 'public', 'store.js');
+const STORE = path.join(__dirname, '..', 'webroot', 'store.js');
 
 let pass = 0, fail = 0;
 function ok(label, cond, detail) {
