@@ -1,0 +1,19 @@
+{
+  "name": "vedryxtech-quotations",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Quotations, invoices and letterhead for VedryxTech.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --env-file-if-exists=.env --watch server.js",
+    "test": "node test/smoke.js && node test/render-test.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "mongodb": "^6.12.0"
+  },
+  "engines": {
+    "node": ">=20.6"
+  }
+}

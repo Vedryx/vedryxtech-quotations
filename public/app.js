@@ -1,0 +1,1095 @@
+/* VedryxTech Quotations — implementation of the "Vedryx Quotations.dc.html"
+ * design file (the source file in Claude Design keeps its original name).
+ *
+ * The design prototype ran on the Claude Design `dc` runtime (React under the
+ * hood, with <sc-if>/<sc-for>/{{ }} templating and a DCLogic class). This is the
+ * same app as plain DOM: one state tree, derived values computed per render,
+ * and real event listeners. Behaviour and visual design are ported 1:1 except
+ * where noted in README.md.
+ */
+'use strict';
+
+/* ------------------------------------------------------------------ config */
+/* Was the prototype's data-props block (accentColor / currency / defaultTax). */
+const CONFIG = {
+  accentColor: '#14171F',   // '#14171F' | '#1A4BF0' | '#0F7B5A' | '#B3521E'
+  currency: '$',            // '$' | '₹' | '€' | '£'
+  defaultTax: 18,           // 0–30 (%)
+};
+
+/* ------------------------------------------------------------- seed record */
+
+function seedQuotes() {
+  return [
+    {
+      id: 1, type: 'quotation', number: 'QT-2026-011', status: 'Sent',
+      issueDate: '2026-07-02', validUntil: '2026-08-01',
+      client: { name: 'Really Great Company', contact: 'Avery Shaw', email: 'avery@reallygreat.com', phone: '', address: '123 Anywhere St, Any City' },
+      items: [
+        { id: 1, service: 'Service 1', description: 'Discovery workshop and requirement mapping', qty: 1, price: 200 },
+        { id: 2, service: 'Service 2', description: 'Backend integration and QA', qty: 1, price: 100 },
+        { id: 3, service: 'Design 1', description: 'UI design for 6 screens, two revision rounds', qty: 1, price: 250 },
+      ],
+      discount: 0, taxRate: 0,
+      notes: '50% advance to begin, balance on delivery.\nQuotation valid for 30 days.',
+    },
+    {
+      id: 2, type: 'quotation', number: 'QT-2026-012', status: 'Sent',
+      issueDate: '2026-07-21', validUntil: '2026-08-20',
+      client: { name: 'Northwind Labs', contact: 'Rhea Menon', email: 'rhea@northwind.io', phone: '', address: '88 Harbour Road, Kochi' },
+      items: [
+        { id: 1, service: 'Website revamp', description: 'Marketing site, 8 pages, CMS setup', qty: 1, price: 1800 },
+        { id: 2, service: 'Maintenance', description: 'Monthly retainer, 3 months', qty: 3, price: 150 },
+      ],
+      discount: 5, taxRate: 18,
+      notes: 'Hosting billed separately at actuals.',
+    },
+    {
+      id: 3, type: 'quotation', number: 'QT-2026-013', status: 'Draft',
+      issueDate: '2026-08-05', validUntil: '2026-09-04',
+      client: { name: 'Halcyon Interiors', contact: 'Dev Patel', email: 'dev@halcyon.design', phone: '', address: 'Unit 4, Prestige Park, Bengaluru' },
+      items: [
+        { id: 1, service: 'Mobile app prototype', description: 'Interactive prototype, iOS and Android layouts', qty: 1, price: 2400 },
+      ],
+      discount: 0, taxRate: 18, notes: '',
+    },
+    {
+      id: 4, type: 'invoice', number: 'INV-2026-004', status: 'Sent',
+      issueDate: '2026-07-06', validUntil: '2026-07-20',
+      client: { name: 'Really Great Company', contact: 'Avery Shaw', email: 'avery@reallygreat.com', phone: '', address: '123 Anywhere St, Any City' },
+      items: [
+        { id: 1, service: 'Service 1', description: 'Discovery workshop and requirement mapping', qty: 1, price: 200 },
+        { id: 2, service: 'Service 2', description: 'Backend integration and QA', qty: 1, price: 100 },
+        { id: 3, service: 'Design 1', description: 'UI design for 6 screens, two revision rounds', qty: 1, price: 250 },
+      ],
+      discount: 0, taxRate: 0,
+      notes: 'Raised against QT-2026-011.\nBank transfer to VedryxTech, details on request.',
+    },
+  ];
+}
+
+/* ---------------------------------------------------------------- storage */
+
+/* Synchronous first paint from the local mirror; the server is consulted just
+   after boot and wins if it answers. See store.js. */
+function loadQuotes() {
+  const local = Store.readLocal();
+  return local && local.length ? local : seedQuotes();
+}
+
+/* Mirror locally right away, then push the one changed document to MongoDB.
+   Resolves false when the database write did not land; the mirror still holds the
+   data and store.js retries it. */
+function persist(changed) {
+  if (changed) return Store.saveDoc(changed, state.quotes);
+  Store.writeLocal(state.quotes);
+  return Promise.resolve(true);
+}
+
+/* ----------------------------------------------------------------- helpers */
+
+const clone = (v) => JSON.parse(JSON.stringify(v));
+
+function money(n) {
+  const v = Number(n) || 0;
+  return CONFIG.currency + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/* Local calendar date as YYYY-MM-DD. toISOString() would shift the day for
+   anyone east or west of UTC. */
+function isoLocal(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function fmtDate(s) {
+  if (!s) return '—';
+  const d = new Date(s + 'T00:00:00');
+  if (isNaN(d.getTime())) return s;
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
+}
+
+/* ------------------------------------------------------ numeric guardrails */
+
+/* Bounds for every numeric field. Enforced three times over: the input strips
+   what you type, blur normalises the field, and the maths clamps again so a bad
+   value reaching us from storage or an older save still cannot go negative. */
+const NUM_LIMITS = {
+  qty:      { min: 0, max: 1e6, step: '1' },
+  price:    { min: 0, max: 1e9, step: '0.01' },
+  discount: { min: 0, max: 100, step: '0.01' },
+  taxRate:  { min: 0, max: 100, step: '0.01' },
+};
+
+/* Anything non-finite, negative or unparseable counts as zero. */
+function nonNeg(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/* A percentage, held to 0–100 so a discount can never exceed the sub-total and
+   flip the document total negative. */
+function pct(v, max = 100) {
+  return Math.min(nonNeg(v), max);
+}
+
+/* Strip everything that isn't a plain non-negative decimal. Runs on each
+   keystroke, so a minus sign or a pasted "-500" can never land in state. */
+function numericText(raw, kind) {
+  const lim = NUM_LIMITS[kind];
+  let s = String(raw ?? '').replace(/[^0-9.]/g, '');
+  const dot = s.indexOf('.');
+  if (dot !== -1) s = s.slice(0, dot + 1) + s.slice(dot + 1).replace(/\./g, '');
+  if (s === '' || s === '.') return s;
+  const n = Number(s);
+  if (!Number.isFinite(n)) return '';
+  if (n > lim.max) return String(lim.max);
+  return s;
+}
+
+/* Settle a half-typed value ("", ".", "12.") into a real number on blur. */
+function numericNormalized(raw, kind) {
+  const lim = NUM_LIMITS[kind];
+  const s = numericText(raw, kind);
+  if (s === '' || s === '.') return String(lim.min);
+  const n = Math.min(Math.max(Number(s), lim.min), lim.max);
+  return String(Math.round(n * 100) / 100);
+}
+
+/* Coerce a document's numerics to clean numbers before it is stored. */
+function normalizeDoc(q) {
+  q.discount = pct(q.discount);
+  q.taxRate = pct(q.taxRate);
+  q.number = String(q.number ?? '').trim();
+  for (const k of ['name', 'contact', 'email', 'phone', 'address']) {
+    q.client[k] = String(q.client[k] ?? '').trim();
+  }
+  for (const it of q.items || []) {
+    it.qty = Math.min(nonNeg(it.qty), NUM_LIMITS.qty.max);
+    it.price = Math.min(nonNeg(it.price), NUM_LIMITS.price.max);
+    it.service = String(it.service ?? '').trim();
+  }
+  return q;
+}
+
+/* A line with no quantity is a flat price, not price × 0. */
+function lineAmount(i) {
+  const q = nonNeg(i.qty);
+  const p = nonNeg(i.price);
+  return q > 0 ? q * p : p;
+}
+
+function totals(q) {
+  const sub = (q.items || []).reduce((a, i) => a + lineAmount(i), 0);
+  const disc = sub * pct(q.discount) / 100;
+  const tax = (sub - disc) * pct(q.taxRate) / 100;
+  return { sub, disc, tax, total: sub - disc + tax };
+}
+
+/* ------------------------------------------------------------- validation */
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/* Returns a { fieldKey: message } map. Empty means the document is sendable. */
+function validateDraft(d) {
+  const e = {};
+  const noun = isInvoice() ? 'Invoice' : 'Quotation';
+
+  if (!String(d.client.name ?? '').trim()) e.clientName = 'Client name is required.';
+  if (!String(d.number ?? '').trim()) e.number = `${noun} number is required.`;
+  if (!d.issueDate) e.issueDate = 'Issue date is required.';
+
+  const email = String(d.client.email ?? '').trim();
+  if (email && !EMAIL_RE.test(email)) e.clientEmail = 'That does not look like an email address.';
+
+  if (d.issueDate && d.validUntil && d.validUntil < d.issueDate) {
+    e.validUntil = `${isInvoice() ? 'Due date' : 'Valid until'} cannot be before the issue date.`;
+  }
+
+  const priced = (d.items || []).filter((i) => String(i.service ?? '').trim() && nonNeg(i.price) > 0);
+  if (!priced.length) {
+    e.items = 'Add at least one service with a name and a rate above zero.';
+  } else if (totals(d).total <= 0) {
+    e.items = 'The document total must be more than zero.';
+  }
+
+  return e;
+}
+
+function nextNumber(type) {
+  const t = type || state.docType;
+  const prefix = t === 'invoice' ? 'INV' : 'QT';
+  const year = new Date().getFullYear();
+  let max = 0;
+  for (const q of state.quotes) {
+    if ((q.type || 'quotation') !== t) continue;
+    const m = /(\d+)\s*$/.exec(q.number || '');
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return `${prefix}-${year}-${String(max + 1).padStart(3, '0')}`;
+}
+
+function initialsOf(name) {
+  return name.split(' ').filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
+}
+
+function blankDoc() {
+  const today = new Date();
+  const later = new Date(today.getTime() + 30 * 864e5);
+  return {
+    id: null, type: state.docType, number: nextNumber(), status: 'Draft',
+    issueDate: isoLocal(today), validUntil: isoLocal(later),
+    client: { name: '', contact: '', email: '', phone: '', address: '' },
+    items: [{ id: Date.now(), service: '', description: '', qty: 1, price: 0 }],
+    discount: 0, taxRate: Number(CONFIG.defaultTax),
+    notes: '50% advance to begin, balance on delivery.\nQuotation valid for 30 days.',
+  };
+}
+
+/* ------------------------------------------------------------ DOM helper */
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  const p = props || {};
+  // type must land before value so date/number inputs accept it
+  if (p.type) el.setAttribute('type', p.type);
+  for (const [k, v] of Object.entries(p)) {
+    if (k === 'type' || v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'text') el.textContent = v;
+    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (k === 'style') el.setAttribute('style', v);
+    else if (k === 'value' || k === 'checked' || k === 'disabled') el[k] = v;
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid == null || kid === false) continue;
+    el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+/* -------------------------------------------------------------------- state */
+
+const state = {
+  screen: 'home',        // home | list | edit | preview | letter
+  docType: 'quotation',  // quotation | invoice
+  filter: 'All',         // All | Draft | Sent
+  saved: false,
+  editingId: null,
+  locked: false,
+  numberTouched: false,
+  quotes: loadQuotes(),
+  draft: null,
+  letterHTML: null,
+  errors: {},        // fieldKey -> message, from validateDraft
+  validated: false,  // messages stay hidden until a send is attempted
+  autoSaved: false,  // set when Preview committed a previously unsaved document
+};
+
+function setState(patch) {
+  Object.assign(state, typeof patch === 'function' ? patch(state) : patch);
+  render();
+}
+
+/* Mutate the draft in place; totals refresh without rebuilding the form so the
+   caret and focus survive typing. */
+function setDraft(fn, { rerender = false } = {}) {
+  if (!state.draft) state.draft = blankDoc();
+  fn(state.draft);
+  state.saved = false;
+  if (rerender) render();
+  else refreshDerived();
+}
+
+/* ------------------------------------------------------------------- routing */
+
+const isInvoice = () => state.docType === 'invoice';
+const listTitle = () => (isInvoice() ? 'Invoices' : 'Quotations');
+
+const goHome = () => setState({ screen: 'home', locked: false });
+const goList = () => setState({ screen: 'list', locked: false });
+
+function openType(type) {
+  setState({ docType: type, screen: 'list', filter: 'All', locked: false });
+}
+
+function newQuote() {
+  state.draft = null;
+  setState({
+    draft: blankDoc(), editingId: null, screen: 'edit', saved: false,
+    numberTouched: false, locked: false, errors: {}, validated: false,
+  });
+}
+
+function openDoc(q) {
+  const lock = !isInvoice() && q.status === 'Sent';
+  setState({
+    draft: clone(q), editingId: q.id, saved: false,
+    numberTouched: true, locked: lock,
+    screen: lock ? 'preview' : 'edit',
+    errors: {}, validated: false,
+  });
+}
+
+function upsert(q) {
+  const list = state.quotes.slice();
+  const i = list.findIndex((x) => x.id === q.id && x.id != null);
+  if (i >= 0) list[i] = q;
+  else { q.id = Date.now(); list.push(q); }
+  return list;
+}
+
+/* The single write path. Every route that commits a document — Save, Preview and
+   Send to client — goes through here, so none of them can navigate away without
+   the document being stored.
+ *
+ * The list and the screen update immediately; the database write is confirmed
+ * afterwards so the UI never blocks on the network. If it fails, store.js queues
+ * a retry and the offline indicator appears. */
+function commit(q, patch) {
+  state.quotes = upsert(q);                 // assigns q.id when the doc is new
+  setState({ draft: q, editingId: q.id, ...patch });
+  persist(q).then((ok) => {
+    if (ok) return;
+    // Surface the failure without disturbing a form the user may be typing in.
+    if (state.screen === 'list') render();
+    else renderTopbar();
+  });
+}
+
+/* Saving a draft stays permissive — a half-filled draft is a legitimate thing to
+   keep. Numbers are still normalised so nothing negative reaches storage. */
+function saveQuote() {
+  const q = normalizeDoc(clone(state.draft || blankDoc()));
+  q.status = q.status === 'Sent' ? 'Sent' : 'Draft';
+  commit(q, { saved: true, autoSaved: false });
+}
+
+/* Worth persisting? A document nobody has typed anything into is not. */
+function isSubstantive(d) {
+  if (String(d.client.name ?? '').trim()) return true;
+  return (d.items || []).some((i) => String(i.service ?? '').trim() || nonNeg(i.price) > 0);
+}
+
+/* Previewing an unsaved document commits it as a draft first, so opening the
+   preview can never be a way to lose work. Blank documents are left alone. */
+function goPreview() {
+  const d = state.draft || blankDoc();
+  if (!isSubstantive(d)) {
+    setState({ screen: 'preview', autoSaved: false });
+    return;
+  }
+  const wasUnsaved = d.id == null;
+  const q = normalizeDoc(clone(d));
+  q.status = q.status === 'Sent' ? 'Sent' : 'Draft';
+  commit(q, { screen: 'preview', saved: false, autoSaved: wasUnsaved });
+}
+
+/* Sending is the locking, client-facing step, so it validates first. */
+function sendQuote() {
+  const d = state.draft || blankDoc();
+  const errors = validateDraft(d);
+  if (Object.keys(errors).length) {
+    setState({ errors, validated: true, screen: 'edit', locked: false });
+    focusFirstError();
+    return;
+  }
+  /* Sending commits the document whether or not Save or Preview was ever pressed. */
+  const q = normalizeDoc(clone(d));
+  q.status = 'Sent';
+  if (!state.numberTouched) q.number = q.number || nextNumber();
+  commit(q, {
+    screen: 'list', filter: 'Sent', locked: false,
+    errors: {}, validated: false, autoSaved: false,
+  });
+}
+
+function focusFirstError() {
+  for (const key of ERROR_ORDER) {
+    const ref = derived.errorNodes[key];
+    if (state.errors[key] && ref && ref.input) { ref.input.focus(); return; }
+  }
+}
+
+function duplicateQuote() {
+  const q = clone(state.draft || blankDoc());
+  q.id = null; q.status = 'Draft'; q.number = nextNumber();
+  setState({
+    draft: q, editingId: null, locked: false, numberTouched: false,
+    screen: 'edit', saved: false, errors: {}, validated: false,
+  });
+}
+
+function invoiceFrom(src) {
+  const q = clone(src);
+  const today = new Date();
+  q.id = null;
+  q.type = 'invoice';
+  q.status = 'Draft';
+  q.issueDate = isoLocal(today);
+  q.validUntil = isoLocal(new Date(today.getTime() + 14 * 864e5));
+  q.notes = `Raised against ${src.number || 'quotation'}.` + (src.notes ? `\n${src.notes}` : '');
+  // docType must flip before nextNumber() reads it
+  state.docType = 'invoice';
+  q.number = nextNumber('invoice');
+  setState({
+    draft: q, editingId: null, numberTouched: false, locked: false, saved: false,
+    screen: 'edit', filter: 'All', errors: {}, validated: false,
+  });
+}
+
+/* --------------------------------------------------------------- top bar */
+
+function renderTopbar() {
+  const showChrome = ['list', 'edit', 'preview'].includes(state.screen);
+  const store = Store.status();
+  const inner = h('div', { class: 'topbar-inner' },
+    h('img', { class: 'topbar-logo', src: 'assets/logo.png', alt: 'VedryxTech', onclick: goHome }),
+    h('div', { class: 'spacer' }),
+    store.error && !store.online && h('span', {
+      class: 'offline-pill',
+      title: `MongoDB unreachable: ${store.error}\nSaved in this browser; queued to sync.`,
+      text: store.pending
+        ? `Offline — ${store.pending} not in database`
+        : 'Offline — saved locally',
+    }),
+    showChrome && h('button', { class: 'btn-ghost', onclick: goList, text: listTitle() }),
+    showChrome && h('button', { class: 'btn-dark', onclick: newQuote, text: 'New' }),
+    state.screen === 'letter' && h('button', { class: 'btn-outline', onclick: goHome, text: 'All tools' }),
+  );
+  const bar = document.getElementById('topbar');
+  bar.replaceChildren(inner);
+}
+
+/* ------------------------------------------------------------------- home */
+
+function renderHome() {
+  const count = (t) => state.quotes.filter((q) => (q.type || 'quotation') === t).length;
+
+  const card = (badge, name, desc, foot, onclick) => h('button', { class: 'tool-card', onclick },
+    h('div', { class: 'tool-badge', text: badge }),
+    h('div', { class: 'spacer' }),
+    h('div', { class: 'tool-name', text: name }),
+    h('div', { class: 'tool-desc', text: desc }),
+    h('div', { class: 'tool-count', text: foot }),
+  );
+
+  return h('div', { class: 'home' },
+    h('h1', { text: 'What are you making?' }),
+    h('p', { class: 'home-sub', text: 'Pick a document type to start.' }),
+    h('div', { class: 'home-grid' },
+      card('Q', 'Quotation', 'Price a scope of work for a client. Locks once sent.',
+        `${count('quotation')} saved`, () => openType('quotation')),
+      card('I', 'Invoice', 'Bill a client. Raise one from a sent quotation in a click, and edit it any time.',
+        `${count('invoice')} saved`, () => openType('invoice')),
+      card('L', 'Letterhead', 'Write on branded paper. Full text formatting, nothing else to fill in.',
+        'Blank sheet', () => setState({ screen: 'letter' })),
+    ),
+  );
+}
+
+/* ------------------------------------------------------------------- list */
+
+function renderList() {
+  const ofType = state.quotes.filter((q) => (q.type || 'quotation') === state.docType);
+  const visible = ofType.filter((q) => state.filter === 'All' || q.status === state.filter).slice().reverse();
+  const outstanding = ofType.filter((q) => q.status === 'Sent').reduce((a, q) => a + totals(q).total, 0);
+
+  const filters = h('div', { class: 'filters' },
+    ['All', 'Draft', 'Sent'].map((f) => h('button', {
+      class: 'chip-filter' + (state.filter === f ? ' is-active' : ''),
+      onclick: () => setState({ filter: f }),
+      text: f,
+    })),
+  );
+
+  const rows = h('div', { class: 'rows' }, visible.map((q) => {
+    const name = q.client.name || 'Untitled client';
+    const canInvoice = !isInvoice() && q.status === 'Sent';
+    return h('div', {
+      class: 'row', role: 'button', tabindex: '0',
+      onclick: () => openDoc(q),
+      onkeydown: (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDoc(q); }
+      },
+    },
+      h('div', { class: 'row-avatar', text: initialsOf(name) }),
+      h('div', { class: 'row-main' },
+        h('div', { class: 'row-client', text: name }),
+        h('div', { class: 'row-meta', text: `${q.number} · ${fmtDate(q.issueDate)}` }),
+      ),
+      h('div', { class: 'row-right' },
+        h('div', { class: 'row-amount', text: money(totals(q).total) }),
+        h('div', { class: 'chip ' + (q.status === 'Sent' ? 'chip-sent' : 'chip-draft'), text: q.status }),
+      ),
+      canInvoice && h('button', {
+        class: 'btn-invoice',
+        text: 'Invoice',
+        onclick: (e) => { e.stopPropagation(); invoiceFrom(q); },
+      }),
+    );
+  }));
+
+  const empty = visible.length === 0 && h('div', { class: 'empty' },
+    h('div', { class: 'empty-title', text: `No ${listTitle().toLowerCase()} here yet` }),
+    h('div', { class: 'empty-sub', text: 'Create one and it will show up in this list.' }),
+    h('button', { class: 'btn-dark', onclick: newQuote, text: `New ${isInvoice() ? 'invoice' : 'quotation'}` }),
+  );
+
+  const store = Store.status();
+  const syncNote = store.pending > 0 && h('div', {
+    class: 'sync-note no-print',
+    text: store.pending === 1
+      ? 'One document is saved on this device only — it will sync to MongoDB automatically when the connection returns.'
+      : `${store.pending} documents are saved on this device only — they will sync to MongoDB automatically when the connection returns.`,
+  });
+
+  return h('div', { class: 'list' },
+    syncNote,
+    h('div', { class: 'list-head' },
+      h('div', null,
+        h('h1', { text: listTitle() }),
+        h('p', { class: 'list-sub', text: `${ofType.length} total · ${visible.length} shown` }),
+      ),
+      h('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' },
+        h('div', { class: 'stat' },
+          h('div', { class: 'stat-label', text: 'Outstanding' }),
+          h('div', { class: 'stat-value', text: money(outstanding) }),
+        ),
+      ),
+    ),
+    filters,
+    rows,
+    empty,
+  );
+}
+
+/* ------------------------------------------------------------------- edit */
+
+/* Nodes whose text is recomputed on every keystroke. */
+const derived = {
+  lineAmounts: [], subTotal: null, discountRow: null, discountLabel: null,
+  discountText: null, taxLabel: null, taxText: null, total: null,
+  errorNodes: {}, itemsError: null, banner: null,
+};
+
+/* Focus order when a send is blocked — matches the visual order of the form. */
+const ERROR_ORDER = ['clientName', 'clientEmail', 'number', 'issueDate', 'validUntil', 'items'];
+
+function setInvalid(input, bad) {
+  if (!input) return;
+  const base = (input.className || '').replace(/\s*is-invalid\b/g, '');
+  input.className = bad ? `${base} is-invalid` : base;
+}
+
+function refreshDerived() {
+  const d = state.draft;
+  if (!d || state.screen !== 'edit') return;
+  const t = totals(d);
+
+  d.items.forEach((it, i) => {
+    const node = derived.lineAmounts[i];
+    if (node) node.textContent = money(lineAmount(it));
+  });
+
+  if (derived.subTotal) derived.subTotal.textContent = money(t.sub);
+  if (derived.discountRow) {
+    const show = pct(d.discount) > 0;
+    derived.discountRow.style.display = show ? '' : 'none';
+    if (show) {
+      derived.discountLabel.textContent = `Discount (${pct(d.discount)}%)`;
+      derived.discountText.textContent = '−' + money(t.disc);
+    }
+  }
+  if (derived.taxLabel) derived.taxLabel.textContent = `Tax (${pct(d.taxRate)}%)`;
+  if (derived.taxText) derived.taxText.textContent = money(t.tax);
+  if (derived.total) derived.total.textContent = money(t.total);
+
+  refreshErrors();
+
+  // "Saved" note is stale the moment anything changes
+  const note = document.getElementById('saved-note');
+  if (note) note.remove();
+}
+
+/* Once a send has been attempted, messages clear themselves as fields are fixed. */
+function refreshErrors() {
+  if (!state.validated || !state.draft) return;
+  state.errors = validateDraft(state.draft);
+
+  for (const [key, ref] of Object.entries(derived.errorNodes)) {
+    const msg = state.errors[key] || '';
+    ref.node.textContent = msg;
+    ref.node.style.display = msg ? '' : 'none';
+    setInvalid(ref.input, !!msg);
+  }
+
+  if (derived.itemsError) {
+    const msg = state.errors.items || '';
+    derived.itemsError.textContent = msg;
+    derived.itemsError.style.display = msg ? '' : 'none';
+  }
+
+  if (derived.banner) {
+    const msgs = Object.values(state.errors);
+    derived.banner.replaceChildren();
+    derived.banner.style.display = msgs.length ? '' : 'none';
+    if (msgs.length) {
+      derived.banner.append(
+        h('div', { text: `Cannot send yet — ${msgs.length} ${msgs.length === 1 ? 'problem' : 'problems'} to fix:` }),
+        h('ul', null, msgs.map((m) => h('li', { text: m }))),
+      );
+    }
+  }
+}
+
+function field(labelText, inputEl, opts = {}) {
+  const { extraClass, errKey } = opts;
+  const kids = [h('span', { class: 'lbl-text', text: labelText }), inputEl];
+
+  if (errKey) {
+    const msg = state.validated ? (state.errors[errKey] || '') : '';
+    const node = h('div', { class: 'field-error', text: msg, style: msg ? '' : 'display:none' });
+    setInvalid(inputEl, !!msg);
+    derived.errorNodes[errKey] = { node, input: inputEl };
+    kids.push(node);
+  }
+
+  return h('label', { class: 'lbl' + (extraClass ? ' ' + extraClass : '') }, ...kids);
+}
+
+/* A number field that cannot hold a negative value: the minus, plus and
+   exponent keys are swallowed, each keystroke is re-stripped (which also covers
+   paste and drag-drop), and blur settles a partial entry into a real number. */
+function numericInput(kind, value, apply, cls = 'inp') {
+  const lim = NUM_LIMITS[kind];
+  return h('input', {
+    class: cls, type: 'number', value,
+    min: String(lim.min), max: String(lim.max), step: lim.step, inputmode: 'decimal',
+    onkeydown: (e) => { if (['-', '+', 'e', 'E'].includes(e.key)) e.preventDefault(); },
+    oninput: (e) => {
+      const fixed = numericText(e.target.value, kind);
+      if (fixed !== e.target.value) e.target.value = fixed;
+      apply(fixed);
+    },
+    onblur: (e) => {
+      const norm = numericNormalized(e.target.value, kind);
+      if (norm !== e.target.value) e.target.value = norm;
+      apply(norm);
+    },
+  });
+}
+
+function renderEdit() {
+  if (!state.draft) state.draft = blankDoc();
+  const d = state.draft;
+  const t = totals(d);
+  derived.lineAmounts = [];
+  derived.errorNodes = {};
+  derived.itemsError = null;
+  derived.banner = null;
+
+  const onClient = (key) => (e) => { const v = e.target.value; setDraft((x) => { x.client[key] = v; }); };
+  const onField = (key) => (e) => { const v = e.target.value; setDraft((x) => { x[key] = v; }); };
+
+  /* ---- client */
+  const clientCard = h('div', { class: 'card' },
+    h('div', { class: 'card-title', text: 'Client' }),
+    h('div', { class: 'field-grid' },
+      field('Client name',
+        h('input', { class: 'inp', value: d.client.name, placeholder: 'Really Great Company', maxlength: '120', oninput: onClient('name') }),
+        { errKey: 'clientName' }),
+      field('Contact person',
+        h('input', { class: 'inp', value: d.client.contact, placeholder: 'Avery Shaw', maxlength: '120', oninput: onClient('contact') })),
+      field('Email',
+        h('input', { class: 'inp', type: 'email', value: d.client.email, placeholder: 'avery@company.com', maxlength: '160', autocomplete: 'off', oninput: onClient('email') }),
+        { errKey: 'clientEmail' }),
+      field('Phone',
+        h('input', { class: 'inp', type: 'tel', value: d.client.phone, placeholder: '+91 98765 43210', maxlength: '32', oninput: onClient('phone') })),
+    ),
+    field('Billing address',
+      h('textarea', { class: 'inp', rows: '2', placeholder: '123 Anywhere St, Any City', maxlength: '400', oninput: onClient('address') }, d.client.address),
+      { extraClass: 'stacked' }),
+  );
+
+  /* ---- document details */
+  const detailsCard = h('div', { class: 'card' },
+    h('div', { class: 'card-title', text: isInvoice() ? 'Invoice details' : 'Quotation details' }),
+    h('div', { class: 'field-grid' },
+      field(isInvoice() ? 'Invoice no.' : 'Quotation no.',
+        h('input', {
+          class: 'inp', value: d.number, maxlength: '40',
+          oninput: (e) => { const v = e.target.value; state.numberTouched = true; setDraft((x) => { x.number = v; }); },
+        }),
+        { errKey: 'number' }),
+      field('Issue date',
+        h('input', { class: 'inp', type: 'date', value: d.issueDate, oninput: onField('issueDate') }),
+        { errKey: 'issueDate' }),
+      field(isInvoice() ? 'Due date' : 'Valid until',
+        h('input', { class: 'inp', type: 'date', value: d.validUntil, min: d.issueDate || null, oninput: onField('validUntil') }),
+        { errKey: 'validUntil' }),
+    ),
+  );
+
+  /* ---- line items */
+  const itemNodes = d.items.map((it, i) => {
+    const amount = h('div', { class: 'item-amount-value', text: money(lineAmount(it)) });
+    derived.lineAmounts[i] = amount;
+    const hasQty = nonNeg(it.qty) > 0;
+
+    return h('div', { class: 'item' },
+      h('div', { class: 'item-top' },
+        h('input', {
+          class: 'item-service', value: it.service, placeholder: 'Service name', maxlength: '120',
+          oninput: (e) => { const v = e.target.value; setDraft((x) => { x.items[i].service = v; }); },
+        }),
+        h('button', {
+          class: 'item-remove', title: 'Remove line', text: '×',
+          onclick: () => setDraft((x) => { if (x.items.length > 1) x.items.splice(i, 1); }, { rerender: true }),
+        }),
+      ),
+      h('textarea', {
+        class: 'item-desc', rows: '2', placeholder: 'Short description of what is included', maxlength: '400',
+        oninput: (e) => { const v = e.target.value; setDraft((x) => { x.items[i].description = v; }); },
+      }, it.description),
+      h('div', { class: 'item-nums' },
+        hasQty && h('label', { class: 'lbl' },
+          h('span', { class: 'lbl-text sm', text: 'Qty' }),
+          numericInput('qty', it.qty, (v) => setDraft((x) => { x.items[i].qty = v; }), 'inp sm'),
+        ),
+        h('label', { class: 'lbl' },
+          h('span', { class: 'lbl-text sm', text: 'Rate' }),
+          numericInput('price', it.price, (v) => setDraft((x) => { x.items[i].price = v; }), 'inp sm'),
+        ),
+        h('div', { class: 'item-amount' },
+          h('div', { class: 'item-amount-label', text: 'Amount' }),
+          amount,
+        ),
+      ),
+      !hasQty && h('button', {
+        class: 'btn-link', text: 'Add quantity',
+        onclick: () => setDraft((x) => { x.items[i].qty = 1; }, { rerender: true }),
+      }),
+    );
+  });
+
+  const itemsCard = h('div', { class: 'card' },
+    h('div', { class: 'card-head' },
+      h('div', { class: 'card-title', text: 'Services' }),
+      h('button', {
+        class: 'btn-soft', text: '+ Add line',
+        onclick: () => setDraft((x) => {
+          x.items.push({ id: Date.now(), service: '', description: '', qty: 1, price: 0 });
+        }, { rerender: true }),
+      }),
+    ),
+    h('div', { class: 'items' }, itemNodes),
+    derived.itemsError = h('div', {
+      class: 'field-error',
+      text: state.validated ? (state.errors.items || '') : '',
+      style: state.validated && state.errors.items ? '' : 'display:none',
+    }),
+  );
+
+  /* ---- other info */
+  const otherCard = h('div', { class: 'card' },
+    h('div', { class: 'card-title', text: 'Other info' }),
+    h('div', { class: 'field-grid narrow' },
+      field('Discount (%)', numericInput('discount', d.discount, (v) => setDraft((x) => { x.discount = v; }))),
+      field('Tax / GST (%)', numericInput('taxRate', d.taxRate, (v) => setDraft((x) => { x.taxRate = v; }))),
+    ),
+    field('Notes & terms',
+      h('textarea', { class: 'inp notes', rows: '3', placeholder: 'Payment terms, delivery timeline, assumptions…', maxlength: '2000', oninput: onField('notes') }, d.notes),
+      { extraClass: 'stacked' }),
+  );
+
+  /* ---- totals rail */
+  derived.subTotal = h('span', { text: money(t.sub) });
+  derived.discountLabel = h('span', { text: `Discount (${pct(d.discount)}%)` });
+  derived.discountText = h('span', { text: '−' + money(t.disc) });
+  derived.taxLabel = h('span', { text: `Tax (${pct(d.taxRate)}%)` });
+  derived.taxText = h('span', { text: money(t.tax) });
+  derived.total = h('span', { class: 'total-grand-value', text: money(t.total) });
+
+  derived.discountRow = h('div', {
+    class: 'total-row',
+    style: pct(d.discount) > 0 ? '' : 'display:none',
+  }, derived.discountLabel, derived.discountText);
+
+  const problems = state.validated ? Object.values(state.errors) : [];
+  derived.banner = h('div', {
+    class: 'error-note',
+    style: problems.length ? '' : 'display:none',
+    role: 'alert',
+  }, problems.length ? [
+    h('div', { text: `Cannot send yet — ${problems.length} ${problems.length === 1 ? 'problem' : 'problems'} to fix:` }),
+    h('ul', null, problems.map((m) => h('li', { text: m }))),
+  ] : []);
+
+  const rail = h('div', { class: 'rail' },
+    h('div', { class: 'card' },
+      h('div', { class: 'total-row' }, h('span', { text: 'Sub-total' }), derived.subTotal),
+      derived.discountRow,
+      h('div', { class: 'total-row ruled' }, derived.taxLabel, derived.taxText),
+      h('div', { class: 'total-grand' },
+        h('span', { class: 'total-grand-label', text: 'Total' }),
+        derived.total,
+      ),
+    ),
+    derived.banner,
+    h('div', { class: 'rail-actions' },
+      h('button', { class: 'btn-outline', text: 'Preview', onclick: goPreview }),
+      h('button', { class: 'btn-dark', text: `Save ${isInvoice() ? 'invoice' : 'quotation'}`, onclick: saveQuote }),
+    ),
+    state.saved && h('div', { class: 'saved-note', id: 'saved-note', text: 'Saved to your quotations list.' }),
+  );
+
+  return h('div', { class: 'edit' },
+    h('div', { class: 'edit-col' },
+      h('div', { class: 'edit-title-row' },
+        h('button', { class: 'btn-back', onclick: goList, text: '←', title: 'Back to list' }),
+        h('h1', { text: `${state.editingId ? 'Edit ' : 'New '}${isInvoice() ? 'invoice' : 'quotation'}` }),
+      ),
+      clientCard, detailsCard, itemsCard, otherCard,
+    ),
+    rail,
+  );
+}
+
+/* ---------------------------------------------------------------- preview */
+
+function renderPreview() {
+  if (!state.draft) state.draft = blankDoc();
+  const d = state.draft;
+  const t = totals(d);
+  const hasDiscount = pct(d.discount) > 0;
+
+  const docItems = d.items
+    .filter((i) => i.service || nonNeg(i.price) > 0)
+    .map((it) => ({
+      service: it.service || 'Untitled service',
+      description: it.description || '',
+      qtyLine: nonNeg(it.qty) > 1 ? `${nonNeg(it.qty)} × ${money(it.price)}` : '',
+      amountText: money(lineAmount(it)),
+    }));
+
+  const clientBlock = [d.client.contact, d.client.email, d.client.phone, d.client.address]
+    .filter(Boolean).join('\n');
+
+  const bar = h('div', { class: 'preview-bar no-print' },
+    h('button', {
+      class: 'btn-back', text: '←', title: 'Back',
+      onclick: () => setState((s) => ({ screen: s.locked ? 'list' : 'edit', locked: false })),
+    }),
+    h('h1', { text: state.locked ? 'Sent quotation' : 'Preview' }),
+    h('button', { class: 'btn-outline', text: 'Download PDF', onclick: () => window.print() }),
+    !state.locked && h('button', { class: 'btn-dark', text: 'Send to client', onclick: sendQuote }),
+    state.locked && h('button', { class: 'btn-outline', text: 'Duplicate as draft', onclick: duplicateQuote }),
+    state.locked && h('button', { class: 'btn-dark', text: 'Create invoice', onclick: () => invoiceFrom(d) }),
+  );
+
+  const sheet = h('div', { class: 'doc-sheet' },
+    h('div', { class: 'doc-head' },
+      h('div', { class: 'doc-stripes' }),
+      h('div', { class: 'doc-tab' }),
+      h('div', { class: 'doc-head-row' },
+        h('img', { class: 'doc-logo', src: 'assets/logo.png', alt: 'VedryxTech' }),
+        h('div', { style: 'text-align:right' }, h('div', { class: 'doc-number', text: d.number })),
+      ),
+      h('h2', { class: 'doc-title', text: isInvoice() ? 'INVOICE' : 'QUOTATION' }),
+      h('div', { class: 'doc-rule' }),
+    ),
+    h('div', { class: 'doc-meta' },
+      h('div', null,
+        h('div', { class: 'doc-label', text: 'BILLED TO' }),
+        h('div', { class: 'doc-client-name', text: d.client.name || 'Client name' }),
+        h('div', { class: 'doc-client-block', text: clientBlock || 'Add client details in the form' }),
+      ),
+      h('div', null,
+        h('div', { class: 'doc-label', text: 'DATE' }),
+        h('div', { class: 'doc-date', text: fmtDate(d.issueDate) }),
+        h('div', { class: 'doc-label spaced', text: isInvoice() ? 'DUE DATE' : 'VALID UNTIL' }),
+        h('div', { class: 'doc-date', text: fmtDate(d.validUntil) }),
+      ),
+    ),
+    h('div', { class: 'doc-items' },
+      h('div', { class: 'doc-items-head' },
+        h('span', { text: 'DESCRIPTION' }),
+        h('span', { text: 'AMOUNT' }),
+      ),
+      docItems.map((di) => h('div', { class: 'doc-item' },
+        h('div', { style: 'min-width:0' },
+          h('div', { class: 'doc-item-service', text: di.service }),
+          di.description && h('div', { class: 'doc-item-desc', text: di.description }),
+          di.qtyLine && h('div', { class: 'doc-item-qty', text: di.qtyLine }),
+        ),
+        h('div', { class: 'doc-item-amount', text: di.amountText }),
+      )),
+    ),
+    h('div', { class: 'doc-totals' },
+      h('div', { class: 'doc-totals-inner' },
+        h('div', { class: 'doc-total-row' }, h('span', { text: 'Sub-Total' }), h('span', { text: money(t.sub) })),
+        hasDiscount && h('div', { class: 'doc-total-row' },
+          h('span', { text: `Discount (${pct(d.discount)}%)` }),
+          h('span', { text: '−' + money(t.disc) }),
+        ),
+        h('div', { class: 'doc-total-row' },
+          h('span', { text: `Tax (${pct(d.taxRate)}%)` }),
+          h('span', { text: money(t.tax) }),
+        ),
+        h('div', { class: 'doc-grand' },
+          h('span', { class: 'doc-grand-label', text: 'TOTAL' }),
+          h('span', { class: 'doc-grand-value', text: money(t.total) }),
+        ),
+      ),
+    ),
+    h('div', { class: 'doc-notes' },
+      h('div', { class: 'doc-label', text: 'NOTES & TERMS' }),
+      h('div', { class: 'doc-notes-body', text: d.notes || '—' }),
+    ),
+    h('div', { class: 'doc-foot' },
+      h('div', { class: 'doc-foot-stripes' }),
+      h('div', { class: 'doc-foot-mail', text: 'hello@vedryxtech.com' }),
+      h('div', { class: 'doc-foot-brand', text: 'VEDRYXTECH' }),
+    ),
+  );
+
+  return h('div', { class: 'preview' },
+    bar,
+    state.autoSaved && !state.locked && h('div', {
+      class: 'saved-note no-print',
+      style: 'margin-bottom:16px',
+      text: `Auto-saved as a draft (${d.number}) so nothing is lost.`,
+    }),
+    state.locked && h('div', {
+      class: 'locked-note no-print',
+      text: `Sent on ${fmtDate(d.issueDate)} — locked. Duplicate it as a draft to make changes.`,
+    }),
+    sheet,
+  );
+}
+
+/* ------------------------------------------------------------- letterhead */
+
+const FORMAT_BUTTONS = [
+  { label: 'B', title: 'Bold', cmd: 'bold', cls: 'b' },
+  { label: 'I', title: 'Italic', cmd: 'italic', cls: 'i' },
+  { label: 'U', title: 'Underline', cmd: 'underline', cls: 'u' },
+  { label: '•', title: 'Bullet list', cmd: 'insertUnorderedList', cls: 'bullet' },
+  { label: '1.', title: 'Numbered list', cmd: 'insertOrderedList', cls: 'plain' },
+  { label: '⟵', title: 'Align left', cmd: 'justifyLeft', cls: 'plain' },
+  { label: '⟷', title: 'Centre', cmd: 'justifyCenter', cls: 'plain' },
+  { label: '⟶', title: 'Align right', cmd: 'justifyRight', cls: 'plain' },
+  { label: '⌫', title: 'Clear formatting', cmd: 'removeFormat', cls: 'plain' },
+];
+
+const SWATCHES = ['#14171F', '#5B6270', '#1A4BF0', '#B3321E', '#0F7B5A'];
+
+let letterEl = null;
+
+/* document.execCommand is deprecated but is still the only broadly supported
+   way to run rich-text commands on a contenteditable region. */
+function exec(cmd, val) {
+  if (letterEl) letterEl.focus();
+  document.execCommand(cmd, false, val === undefined ? null : val);
+}
+
+function defaultLetterHTML() {
+  const today = fmtDate(isoLocal(new Date()));
+  return `<p style="margin:0 0 14px">${today}</p>`
+    + '<p style="margin:0 0 14px">To whom it may concern,</p>'
+    + '<p style="margin:0 0 14px">Start typing here. Select any text and use the toolbar above to '
+    + 'change its font, size, colour or weight.</p>'
+    + '<p style="margin:0">Regards,<br>VedryxTech</p>';
+}
+
+function renderLetter() {
+  const body = h('div', {
+    class: 'letter-body',
+    contenteditable: 'true',
+    spellcheck: 'true',
+    oninput: (e) => { state.letterHTML = e.target.innerHTML; },
+  });
+  body.innerHTML = state.letterHTML ?? defaultLetterHTML();
+  letterEl = body;
+
+  const fontSelect = h('select', {
+    class: 'letter-select', title: 'Font',
+    onchange: (e) => exec('fontName', e.target.value),
+  }, ['Manrope', 'Georgia', 'Helvetica', 'Times New Roman', 'Courier New']
+    .map((f) => h('option', { value: f, text: f })));
+
+  const sizeSelect = h('select', {
+    class: 'letter-select', title: 'Size',
+    onchange: (e) => exec('fontSize', e.target.value),
+  }, [['3', '14 pt'], ['1', '10 pt'], ['2', '12 pt'], ['4', '18 pt'], ['5', '24 pt'], ['6', '32 pt']]
+    .map(([v, l]) => h('option', { value: v, text: l })));
+
+  const tools = h('div', { class: 'letter-tools no-print' },
+    fontSelect,
+    sizeSelect,
+    h('div', { class: 'tool-sep' }),
+    FORMAT_BUTTONS.map((b) => h('button', {
+      class: 'fmt-btn ' + b.cls, title: b.title, text: b.label,
+      onclick: () => exec(b.cmd),
+    })),
+    h('div', { class: 'tool-sep' }),
+    h('div', { class: 'swatches' }, SWATCHES.map((c) => h('button', {
+      class: 'swatch', title: c, style: `background:${c}`,
+      onclick: () => exec('foreColor', c),
+    }))),
+  );
+
+  return h('div', { class: 'letter' },
+    h('div', { class: 'letter-bar no-print' },
+      h('h1', { text: 'Letterhead' }),
+      h('button', { class: 'btn-outline', text: 'Download PDF', onclick: () => window.print() }),
+    ),
+    tools,
+    h('div', { class: 'doc-sheet letter-sheet' },
+      h('div', { class: 'letter-head' },
+        h('div', { class: 'doc-stripes' }),
+        h('div', { class: 'doc-tab' }),
+        h('img', { class: 'letter-logo', src: 'assets/logo.png', alt: 'VedryxTech' }),
+      ),
+      body,
+      h('div', { class: 'doc-foot letter-foot' },
+        h('div', { class: 'doc-foot-stripes' }),
+        h('div', { class: 'doc-foot-mail', text: 'hello@vedryxtech.com' }),
+        h('div', { class: 'doc-foot-brand', text: 'VEDRYXTECH' }),
+      ),
+    ),
+  );
+}
+
+/* ----------------------------------------------------------------- render */
+
+const SCREENS = {
+  home: renderHome,
+  list: renderList,
+  edit: renderEdit,
+  preview: renderPreview,
+  letter: renderLetter,
+};
+
+function render() {
+  if (state.screen !== 'letter') letterEl = null;
+  renderTopbar();
+  const view = (SCREENS[state.screen] || renderHome)();
+  document.getElementById('screen').replaceChildren(view);
+}
+
+function init() {
+  document.documentElement.style.setProperty('--accent', CONFIG.accentColor);
+  render();
+
+  // The local mirror has already painted; ask the database for the real list.
+  Store.onStatusChange(renderTopbar);
+  Store.syncFromServer(state.quotes).then((documents) => {
+    if (documents) state.quotes = documents;
+    render();
+  });
+}
+
+document.addEventListener('DOMContentLoaded', init);
