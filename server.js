@@ -139,6 +139,15 @@ app.use(express.static(path.join(__dirname, 'webroot')));
 const MAX_PCT = 100;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
+/* Currencies the picker offers. ISO 4217 codes end-to-end (server, client,
+   storage) so Intl.NumberFormat decides symbol + decimals per locale. Older
+   documents without a currency field default to USD on read. */
+const CURRENCIES = ['USD', 'INR', 'EUR', 'AED', 'GBP', 'JPY'];
+const DEFAULT_CURRENCY = 'USD';
+const coerceCurrency = (c) => (CURRENCIES.includes(String(c || '').toUpperCase())
+  ? String(c).toUpperCase()
+  : DEFAULT_CURRENCY);
+
 const nonNeg = (v) => {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -196,6 +205,7 @@ function sanitize(raw) {
     type,
     number: str(raw.number, 40),
     status: raw.status === 'Sent' ? 'Sent' : 'Draft',
+    currency: coerceCurrency(raw.currency),
     issueDate: str(raw.issueDate, 10),
     validUntil: str(raw.validUntil, 10),
     client: {
@@ -273,10 +283,15 @@ app.delete('/api/documents/:id', async (req, res) => {
 /* ---------------------------------------------------------------- email */
 
 /* Money format used by the plain-HTML email — kept minimal so it renders
-   identically in Gmail, Outlook and Apple Mail without a heavyweight template. */
-function fmtMoney(currency, n) {
+   identically in Gmail, Outlook and Apple Mail without a heavyweight template.
+   Symbol placement and decimal count come from Intl.NumberFormat so each
+   currency looks right on its own (JPY has 0 decimals, AED prefixes "AED ",
+   GBP prefixes £, etc). Locale is pinned to en-US so grouping is consistent
+   across mail clients regardless of the recipient's system locale. */
+function fmtMoney(code, n) {
   const v = Number(n) || 0;
-  return (currency || '$') + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const currency = coerceCurrency(code);
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(v);
 }
 
 function totals(doc) {
@@ -296,9 +311,12 @@ const esc = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-function renderDocEmail(doc, currency = '$') {
+function renderDocEmail(doc) {
   const t = totals(doc);
   const title = doc.type === 'invoice' ? 'Invoice' : 'Quotation';
+  /* Doc is the source of truth for currency. sanitize() defaults to USD when
+     absent so older docs (pre-currency-selector) still render cleanly. */
+  const currency = coerceCurrency(doc?.currency);
   const rows = (doc.items || [])
     .filter((i) => (i.service || '').trim() || nonNeg(i.price) > 0)
     .map((it) => {
@@ -419,11 +437,12 @@ app.post('/api/documents/:id/send', async (req, res) => {
 
   const from = process.env.SALES_FROM || 'sales@team.vedryxtech.com';
   const cc = process.env.SALES_CC || 'we@vedryxtech.com';
-  const currency = str(req.body?.currency, 4) || '$';
 
   const noun = doc.type === 'invoice' ? 'Invoice' : 'Quotation';
   const subject = `${noun} ${doc.number || ''} from Vedryx`.replace(/\s+/g, ' ').trim();
-  const html = renderDocEmail(doc, currency);
+  /* The doc carries its own currency (see sanitize()); the request body no
+     longer overrides it — the sent email must match what was saved. */
+  const html = renderDocEmail(doc);
 
   const payload = {
     from,
@@ -483,4 +502,4 @@ async function start() {
 
 if (require.main === module) start();
 
-module.exports = { app, sanitize, renderDocEmail, start };
+module.exports = { app, sanitize, renderDocEmail, fmtMoney, CURRENCIES, DEFAULT_CURRENCY, start };

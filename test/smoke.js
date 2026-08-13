@@ -29,7 +29,8 @@ src += `
 module.exports = { money, totals, nextNumber, lineAmount, isoLocal, fmtDate,
   initialsOf, blankDoc, upsert, state, CONFIG,
   nonNeg, pct, numericText, numericNormalized, normalizeDoc, validateDraft,
-  deriveLetterTitle, NUM_LIMITS };`;
+  deriveLetterTitle, NUM_LIMITS,
+  coerceCurrency, CURRENCIES, CURRENCY_CODES, DEFAULT_CURRENCY };`;
 
 const m = new Module(APP, null);
 m.filename = APP;
@@ -110,11 +111,32 @@ const outstanding = A.state.quotes
   .reduce((a, q) => a + A.totals(q).total, 0);
 eq('sum of QT-011 + QT-012', outstanding, 3072.25);
 
-console.log('money');
+console.log('money — default (USD) formatting is unchanged');
 eq('thousands + 2dp', A.money(2522.25), '$2,522.25');
 eq('zero', A.money(0), '$0.00');
 eq('rounds to 2dp', A.money(1.005), '$1.01');
 eq('non-numeric', A.money('abc'), '$0.00');
+
+console.log('money — explicit currency code per document');
+eq('USD explicit', A.money(1000, 'USD'), '$1,000.00');
+eq('INR uses ₹', A.money(100000, 'INR'), '₹100,000.00');
+eq('EUR uses €', A.money(1000, 'EUR'), '€1,000.00');
+eq('GBP uses £', A.money(1000, 'GBP'), '£1,000.00');
+eq('AED has no symbol, prefixes code', A.money(1000, 'AED'), 'AED 1,000.00');
+eq('JPY renders with 0 decimals', A.money(1000, 'JPY'), '¥1,000');
+eq('JPY rounds sub-yen', A.money(12.5, 'JPY'), '¥13');
+eq('unknown code falls back to USD', A.money(50, 'XYZ'), '$50.00');
+eq('lowercase code is normalised', A.money(50, 'inr'), '₹50.00');
+
+console.log('coerceCurrency — allowlist + default');
+eq('valid code passes through', A.coerceCurrency('EUR'), 'EUR');
+eq('lowercase normalised to upper', A.coerceCurrency('gbp'), 'GBP');
+eq('unknown code defaults to USD', A.coerceCurrency('ZZZ'), 'USD');
+eq('empty defaults to USD', A.coerceCurrency(''), 'USD');
+eq('null defaults to USD', A.coerceCurrency(null), 'USD');
+eq('undefined defaults to USD', A.coerceCurrency(undefined), 'USD');
+eq('picker offers exactly six codes', A.CURRENCY_CODES.sort(), ['AED', 'EUR', 'GBP', 'INR', 'JPY', 'USD']);
+eq('default currency constant is USD', A.DEFAULT_CURRENCY, 'USD');
 
 console.log('numbering');
 eq('next quotation', A.nextNumber('quotation'), 'QT-' + new Date().getFullYear() + '-014');
@@ -148,6 +170,7 @@ console.log('blank doc');
 eq('inherits defaultTax', A.blankDoc().taxRate, A.CONFIG.defaultTax);
 eq('starts as Draft', A.blankDoc().status, 'Draft');
 eq('one empty line', A.blankDoc().items.length, 1);
+eq('inherits default currency (USD)', A.blankDoc().currency, 'USD');
 eq('respects the docType (quotation)', (() => { A.state.docType = 'quotation'; return A.blankDoc().type; })(), 'quotation');
 eq('respects the docType (invoice)', (() => { A.state.docType = 'invoice'; return A.blankDoc().type; })(), 'invoice');
 A.state.docType = 'quotation';
