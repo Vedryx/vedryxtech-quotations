@@ -6,11 +6,43 @@
 'use strict';
 
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const db = require('./lib/db');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+
+/* -------------------------------------------------------------------- auth
+ * Whole-app HTTP Basic Auth. The app has no per-user accounts (internal tool),
+ * but it is deployed on a public domain and exposes unauthenticated mutation +
+ * an outbound-email endpoint — so a single shared credential gates everything
+ * (static, API, /send) at the edge of the process. Enabled whenever
+ * APP_PASSWORD is set; if it is unset the app runs open and warns loudly at
+ * startup, so a misconfigured deploy is visible rather than silently exposed. */
+const APP_USER = process.env.APP_USER || 'vedryx';
+const APP_PASSWORD = process.env.APP_PASSWORD || '';
+
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+
+app.use((req, res, next) => {
+  if (!APP_PASSWORD) return next(); // unprotected — start() warns
+  const [scheme, encoded] = String(req.headers.authorization || '').split(' ');
+  if (scheme === 'Basic' && encoded) {
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    const sep = decoded.indexOf(':');
+    const user = decoded.slice(0, sep);
+    const pass = decoded.slice(sep + 1);
+    if (safeEqual(user, APP_USER) && safeEqual(pass, APP_PASSWORD)) return next();
+  }
+  res.set('WWW-Authenticate', 'Basic realm="VedryxTech Quotations", charset="UTF-8"');
+  return res.status(401).send('Authentication required.');
+});
 
 /* Letterheads carry rich-text HTML up to ~200 KB — the previous 1 MB cap was
    plenty, keep it generous. */
@@ -29,6 +61,27 @@ const nonNeg = (v) => {
 
 const str = (v, max) => String(v ?? '').trim().slice(0, max);
 
+/* Letterhead bodies are internally-authored rich text (contenteditable), so we
+   keep formatting tags but strip anything executable. The whole-app auth gate is
+   the primary defence against a hostile letter; this is defence-in-depth so a
+   stored `<script>` / `onerror=` can never fire when the body is rendered via
+   innerHTML on the letter screen. Not a general-purpose sanitizer — scoped to
+   this one trusted-author field. */
+function sanitizeLetterHtml(raw) {
+  return String(raw ?? '')
+    .slice(0, 200000)
+    // drop dangerous elements and their contents
+    .replace(/<\s*(script|style|iframe|object|embed|link|meta|base)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    // drop the same as self-closing / unclosed tags
+    .replace(/<\s*(script|style|iframe|object|embed|link|meta|base)\b[^>]*\/?>/gi, '')
+    // strip inline event handlers: on*="..." / on*='...' / on*=bare
+    .replace(/\son\w+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son\w+\s*=\s*'[^']*'/gi, '')
+    .replace(/\son\w+\s*=\s*[^\s>]+/gi, '')
+    // neutralise javascript: in href/src
+    .replace(/((?:href|src)\s*=\s*["']?)\s*javascript:[^"'>\s]*/gi, '$1#');
+}
+
 /* The browser validates too, but never trust the client: a document arriving
    here is re-clamped so nothing negative can reach the database. Each type
    has its own shape; unknown types are rejected. */
@@ -46,7 +99,7 @@ function sanitize(raw) {
       id,
       type,
       title: str(raw.title, 160) || 'Untitled letter',
-      html: String(raw.html ?? '').slice(0, 200000),
+      html: sanitizeLetterHtml(raw.html),
       updatedAt: new Date().toISOString(),
     };
   }
@@ -327,6 +380,11 @@ async function start() {
 
   app.listen(PORT, () => {
     console.log(`VedryxTech Quotations  →  http://localhost:${PORT}`);
+    if (APP_PASSWORD) {
+      console.log(`Access                 →  Basic Auth ON (user "${APP_USER}")`);
+    } else {
+      console.warn('Access                 →  UNPROTECTED — set APP_PASSWORD to gate the app (open relay + XSS risk if public)');
+    }
     if (connected) {
       const cols = Object.values(s.collections).join(', ');
       console.log(`MongoDB connected      →  ${s.uri} (db "${s.db}", collections: ${cols})`);
