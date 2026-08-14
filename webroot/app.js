@@ -611,7 +611,8 @@ function renderTopbar() {
     text: state.theme === 'dark' ? '☀' : '☾',
   });
   const inner = h('div', { class: 'topbar-inner' },
-    h('img', { class: 'topbar-logo', src: 'assets/logo.png', alt: 'VedryxTech', onclick: goHome }),
+    h('img', { class: 'topbar-logo topbar-logo-light', src: 'assets/logo.svg', alt: 'VedryxTech', onclick: goHome }),
+    h('img', { class: 'topbar-logo topbar-logo-dark', src: 'assets/logo-dark.svg', alt: 'VedryxTech', onclick: goHome }),
     h('div', { class: 'spacer' }),
     store.error && !store.online && h('span', {
       class: 'offline-pill',
@@ -1143,7 +1144,7 @@ function renderPreview() {
       h('div', { class: 'doc-stripes' }),
       h('div', { class: 'doc-tab' }),
       h('div', { class: 'doc-head-row' },
-        h('img', { class: 'doc-logo', src: 'assets/logo.png', alt: 'VedryxTech' }),
+        h('img', { class: 'doc-logo', src: 'assets/logo.svg', alt: 'VedryxTech' }),
         h('div', { style: 'text-align:right' }, h('div', { class: 'doc-number', text: d.number })),
       ),
       h('h2', { class: 'doc-title', text: isInvoice() ? 'INVOICE' : 'QUOTATION' }),
@@ -1418,7 +1419,7 @@ function renderLetter() {
       h('div', { class: 'letter-head' },
         h('div', { class: 'doc-stripes' }),
         h('div', { class: 'doc-tab' }),
-        h('img', { class: 'letter-logo', src: 'assets/logo.png', alt: 'VedryxTech' }),
+        h('img', { class: 'letter-logo', src: 'assets/logo.svg', alt: 'VedryxTech' }),
       ),
       body,
       h('div', { class: 'doc-foot letter-foot' },
