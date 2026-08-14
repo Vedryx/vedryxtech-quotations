@@ -481,6 +481,10 @@ app.post('/api/documents/:id/send', async (req, res) => {
 
   const from = process.env.SALES_FROM || 'sales@team.vedryxtech.com';
   const cc = process.env.SALES_CC || 'we@vedryxtech.com';
+  /* Replies go to a mailbox we actually read, not the send-only From address.
+     The From (sales@team.vedryxtech.com) routes inbound to the sales-kanban
+     webhook's unmatched bucket; Reply-To points client replies at we@ instead. */
+  const replyTo = process.env.SALES_REPLY_TO || 'we@vedryxtech.com';
 
   const noun = doc.type === 'invoice' ? 'Invoice' : 'Quotation';
   const defaultSubject = `${noun} ${doc.number || ''} from Vedryx`.replace(/\s+/g, ' ').trim();
@@ -515,6 +519,7 @@ app.post('/api/documents/:id/send', async (req, res) => {
     from,
     to: [recipient],
     cc: cc ? [cc] : undefined,
+    reply_to: replyTo,
     subject,
     html,
     attachments: [{
