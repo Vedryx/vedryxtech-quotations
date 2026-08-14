@@ -64,6 +64,9 @@ a:hover { color: var(--link-hover); }
   display: flex; align-items: center; gap: 12px;
 }
 .topbar-logo { height: 22px; width: auto; display: block; cursor: pointer; }
+.topbar-logo-dark { display: none; }
+:root[data-theme="dark"] .topbar-logo-light { display: none; }
+:root[data-theme="dark"] .topbar-logo-dark { display: block; }
 .spacer { flex: 1; }
 
 .sync-note {
