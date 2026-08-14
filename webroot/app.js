@@ -578,10 +578,23 @@ function initTheme() {
   state.theme = applyTheme(stored || (prefersDark ? 'dark' : 'light'));
 }
 
-/* Clears the session cookie server-side, then reloads — the gate then serves
-   the login screen. No-op-safe when the app runs without a password. */
+/* Full sign-out: clears the httpOnly session cookie server-side, then wipes ALL
+   client-side state — localStorage (theme + the document mirror), sessionStorage,
+   and every JS-readable cookie — so nothing (including cached docs) survives into
+   the next session. Then reloads; the gate serves the login screen. No-op-safe
+   when the app runs without a password. */
 async function logout() {
   try { await fetch('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
+  try { localStorage.clear(); } catch { /* private mode */ }
+  try { sessionStorage.clear(); } catch { /* private mode */ }
+  try {
+    // The vq_session cookie is httpOnly (cleared above by /api/logout); this
+    // expires any remaining JS-visible cookies for this origin.
+    for (const c of document.cookie.split(';')) {
+      const name = c.split('=')[0].trim();
+      if (name) document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/`;
+    }
+  } catch { /* ignore */ }
   window.location.reload();
 }
 
